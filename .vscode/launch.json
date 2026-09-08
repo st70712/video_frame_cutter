@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Video Frame Cutter",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "video_frame_cutter",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "cwd": "${workspaceFolder}",
+            "args": ["${workspaceFolder}/video.mp4"],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Original Video Acceptance",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/verify_real_video.py",
+            "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
