@@ -35,3 +35,33 @@ def test_marker_workflow(qtbot, video_path, monkeypatch):
     window.dirty = False
     window.close()
     qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
+
+
+def test_analysis_action_preserves_manual_markers_and_undo(qtbot, video_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    window = MainWindow()
+    window.confirm_discard = lambda: True
+    errors = []
+    window.error = errors.append
+    qtbot.addWidget(window)
+    window.show()
+    window.load_video(video_path)
+    qtbot.waitUntil(
+        lambda: window.frame_image is not None and not window.jobs, timeout=15000,
+    )
+    window.add_marker()
+    manual_uid = window.markers[0].uid
+    window.start_analysis()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=15000)
+    assert not errors
+    assert len(window.timeline.curve) == len(window.info.frames)
+    assert manual_uid in [marker.uid for marker in window.markers]
+    assert any(marker.source == "automatic" for marker in window.markers)
+    applied = [marker.uid for marker in window.markers]
+    window.undo_stack.undo()
+    assert [marker.uid for marker in window.markers] == [manual_uid]
+    window.undo_stack.redo()
+    assert [marker.uid for marker in window.markers] == applied
+    window.dirty = False
+    window.close()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
