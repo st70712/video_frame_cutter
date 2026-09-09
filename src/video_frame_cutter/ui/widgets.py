@@ -4,6 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -11,11 +12,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from ..models import CropRect, timecode
+from ..models import AnalysisSettings, CropRect, ExportSettings, timecode
 
 
 def pixmap(image):
@@ -305,6 +307,119 @@ class CropCanvas(ImageView):
 
     def mouseReleaseEvent(self, event):
         self.mode = None
+
+
+class AnalysisSettingsDialog(QDialog):
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("分析畫面變化")
+        self.threshold = self._decimal(0.001, 1, settings.threshold, 0.01)
+        self.area = self._decimal(0, 100, settings.area * 100, 0.1)
+        self.stable = self._decimal(0.05, 10, settings.stable_seconds, 0.05)
+        self.interval = self._decimal(0, 60, settings.min_interval, 0.1)
+        self.width = QComboBox()
+        widths = [160, 320, 480, 640, 960]
+        if settings.width not in widths:
+            widths.append(settings.width)
+            widths.sort()
+        for width in widths:
+            self.width.addItem(str(width), width)
+        self.width.setCurrentIndex(self.width.findData(settings.width))
+        form = QFormLayout()
+        form.addRow("變化門檻", self.threshold)
+        form.addRow("最小變化面積 (%)", self.area)
+        form.addRow("穩定時間 (秒)", self.stable)
+        form.addRow("最小間隔 (秒)", self.interval)
+        form.addRow("分析寬度 (px)", self.width)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("開始分析")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _decimal(self, minimum, maximum, value, step):
+        control = QDoubleSpinBox()
+        control.setDecimals(3)
+        control.setRange(minimum, maximum)
+        control.setSingleStep(step)
+        control.setValue(value)
+        return control
+
+    def settings(self):
+        return AnalysisSettings(
+            self.threshold.value(),
+            self.area.value() / 100,
+            self.stable.value(),
+            self.interval.value(),
+            self.width.currentData(),
+        )
+
+
+class ExportSettingsDialog(QDialog):
+    def __init__(self, settings, selected_count, kind="jpg", selected_only=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("匯出截圖")
+        self.format = QComboBox()
+        self.format.addItem("JPG 圖片", "jpg")
+        self.format.addItem("PowerPoint 簡報", "pptx")
+        self.format.setCurrentIndex(max(0, self.format.findData(kind)))
+        self.output_width = QSpinBox()
+        self.output_height = QSpinBox()
+        for control, value in (
+            (self.output_width, settings.width),
+            (self.output_height, settings.height),
+        ):
+            control.setRange(16, 8192)
+            control.setValue(value)
+        dimensions = QHBoxLayout()
+        dimensions.addWidget(self.output_width)
+        dimensions.addWidget(QLabel("×"))
+        dimensions.addWidget(self.output_height)
+        self.quality = QSpinBox()
+        self.quality.setRange(1, 100)
+        self.quality.setValue(settings.quality)
+        self.timestamp = QCheckBox("投影片顯示時間戳")
+        self.timestamp.setChecked(settings.timestamp)
+        self.selected_only = QCheckBox(f"僅匯出選取的標記（{selected_count}）")
+        self.selected_only.setChecked(selected_only and selected_count > 0)
+        self.selected_only.setEnabled(selected_count > 0)
+        form = QFormLayout()
+        form.addRow("格式", self.format)
+        form.addRow("輸出尺寸 (px)", dimensions)
+        form.addRow("JPEG 品質", self.quality)
+        form.addRow("", self.timestamp)
+        form.addRow("", self.selected_only)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("選擇輸出位置")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.format.currentIndexChanged.connect(self._update_format_controls)
+        self._update_format_controls()
+
+    def _update_format_controls(self):
+        self.timestamp.setEnabled(self.kind() == "pptx")
+
+    def kind(self):
+        return self.format.currentData()
+
+    def settings(self):
+        return ExportSettings(
+            self.output_width.value(),
+            self.output_height.value(),
+            self.quality.value(),
+            self.timestamp.isChecked(),
+        )
 
 
 class CropDialog(QDialog):

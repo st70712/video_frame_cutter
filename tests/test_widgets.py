@@ -1,9 +1,45 @@
 from PIL import Image
 from PySide6.QtCore import Qt
 
-from video_frame_cutter.models import CropRect, ExportSettings
-from video_frame_cutter.ui.widgets import CropDialog, Timeline
+from video_frame_cutter.models import AnalysisSettings, CropRect, ExportSettings
+from video_frame_cutter.ui.widgets import (
+    AnalysisSettingsDialog,
+    CropDialog,
+    ExportSettingsDialog,
+    Timeline,
+)
 from video_frame_cutter.workers import Job
+
+
+def test_analysis_settings_dialog_roundtrip(qtbot):
+    original = AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640)
+    dialog = AnalysisSettingsDialog(original)
+    qtbot.addWidget(dialog)
+
+    assert dialog.settings() == original
+    dialog.threshold.setValue(0.25)
+    dialog.reject()
+    assert original == AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640)
+
+
+def test_export_settings_dialog_options(qtbot):
+    original = ExportSettings(1280, 720, 88, True)
+    dialog = ExportSettingsDialog(original, 3, "pptx", True)
+    qtbot.addWidget(dialog)
+
+    assert dialog.kind() == "pptx"
+    assert dialog.timestamp.isEnabled()
+    assert dialog.selected_only.isChecked()
+    assert dialog.settings() == original
+    dialog.format.setCurrentIndex(dialog.format.findData("jpg"))
+    assert not dialog.timestamp.isEnabled()
+    dialog.reject()
+    assert original == ExportSettings(1280, 720, 88, True)
+
+    no_selection = ExportSettingsDialog(original, 0, selected_only=True)
+    qtbot.addWidget(no_selection)
+    assert not no_selection.selected_only.isEnabled()
+    assert not no_selection.selected_only.isChecked()
 
 
 def test_crop_dialog(qtbot):
