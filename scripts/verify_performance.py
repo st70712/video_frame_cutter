@@ -11,6 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 from xml.etree import ElementTree
 
+from video_frame_cutter.analysis import analysis_defaults
 from video_frame_cutter.verification_io import read_snapshot
 from video_frame_cutter.verification_io import save_snapshot as save_state
 
@@ -200,8 +201,10 @@ def main():
     benchmark_path = output / "benchmark.json"
     progress_path = output / "progress.json"
     python = sys.executable
+    defaults = analysis_defaults()
     benchmark = [python, "-u", str(root / "scripts/benchmark_analysis.py"), "--full",
-                 "--width", str(arguments.width), "--workers", "4", "--decoder-threads", "2",
+                 "--width", str(arguments.width), "--workers", str(defaults["workers"]),
+                 "--decoder-threads", str(defaults["decoder_threads"]),
                  "--output", str(benchmark_path), "--progress-output", str(progress_path)]
     gui_directory = output / "gui-results"
     gui = [python, "-u", str(root / "scripts/verify_real_video.py"),

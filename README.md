@@ -117,13 +117,18 @@ py -3.14 -m venv .venv
 
 ## 分析效能與一致性驗證
 
-2026-09-08 本機 Windows／Python 3.14.5／16 邏輯處理器，使用 1280×720、30 fps、60,741 幀的原片，160 px 舊版完整基準為 687.97 秒，新版為 236.19 秒。新版三次 GUI 完整分析為 **243.61、252.71、243.91 秒**，均低於五分鐘，且逐幀像素、曲線及標記結果與同寬度舊版完全一致。計時包含驗證用雜湊，不包含索引或匯出；不是所有硬體／影片的速度保證。
+2026-09-09 本機 Windows／Python 3.14.5／Intel i5-13500（14 核心、20 邏輯處理器），使用 1280×720、30 fps、60,741 幀的原片，160 px 由初始提交 `e0dc422` 載入的舊版完整基準為 **856.74 秒**，目前版本為 **22.3–40.0 秒**（同一程式兩次量測，較慢一次緊接在 15 分鐘舊版基準之後、機器已降頻）；GUI 三次完整分析為 **24.19、23.90、23.75 秒**（各次上限 120 秒）。逐幀分析像素、SSIM 曲線與標記語意（PTS、change_seconds、score、review、included）與舊版逐位元一致，不放寬任何浮點容忍度；與既有 `video.vfc.json` 的 30 個標記比對，僅最後一個標記的匯出勾選不同，那是先前在介面手動取消勾選的結果。計時包含驗證用雜湊，不包含索引或匯出；不是所有硬體／影片的速度保證。
 
-480 px 全片比對與 GUI 驗收也已通過：舊版基準 **1009.73 秒**，新版基準 **614.51 秒**（約 1.64 倍吞吐量），GUI 分析 **459.22 秒**。兩次新版執行皆與同寬度舊版完整結果一致。基準與 GUI 是不同次執行，有排程／快取等變異，不能混用兩者計算加速比；480 px 不要求低於五分鐘。最後回歸曾發現監督工具的 Windows 進度檔讀寫競態，修正後為 **62 項通過、1 項原片長測依預設跳過**。完整證據與原始失敗紀錄的說明見 [效能優化計畫](docs/performance-plan.md)。
+2026-09-08 第一輪的 160 px（236.19 秒）與 480 px（614.51 秒）結果、以及當時監督工具的 Windows 進度檔讀寫競態修正，保留於 [效能優化計畫](docs/performance-plan.md)。480 px 本輪未重新量測完整原片；其前處理走同一條路徑，但每幀 SSIM 成本較高，不宣稱時間。
 
-分析使用 4 個影像前處理 worker、預取 buffer 8 與 2 個解碼執行緒。前處理減少 RGB 圖片拷貝，但保留原本 Pillow BILINEAR、完整逐幀 SSIM 和穩定判定；旋轉或非方形像素仍使用既有顯示轉換。所有影格按原始 PTS 順序交給同一個偵測器，不跳幀、不使用結果快取，也不改變裁切／匯出的圖片處理。
+本輪的加速全部來自數學上完全等價的改寫，演算法與參數語意不變：
 
-Python 3.14 的有界 `Executor.map` 在取出結果時最多額外提交一項工作，因此 buffer 8 最多預取約 9 個工作，不會把整支影片載入前處理佇列。取消會停止提交並等待正在執行的少量轉圖工作結束，關閉執行緒後才釋放 decoder。讀取很慢的磁碟／網路檔案仍可能延遲取消。
+- 偵測器的差分圖改用 uint8 的 `max(a,b) - min(a,b)` 取三通道最大值，並以整數計數除以像素數取得變化面積；與原本 int16 版本逐位元相同，速度約 8 倍。相鄰幀完全相同時直接回傳 0。
+- 轉圖改用每個 worker 執行緒快取的 swscale 轉換器輸出 `rgb24`，Pillow 直接依平面 stride 讀入後做原本的 BILINEAR 縮放；與 `to_ndarray("rgb24")` 再縮放的結果逐像素相同（含 162、900、1366 等非 16 倍數寬度的雜訊測試）。曾試過 `rgb0` 零拷貝路徑，但 swscale 在非 16 倍數寬度會產生不同像素，已改回。旋轉或非方形像素仍使用既有顯示轉換。
+- 解碼後的影格若與前一幀的原始緩衝區逐位元相同（此原片有 93.8% 的影格如此），直接沿用前一幀的分析像素，不重複轉圖；緩衝區不同才轉圖，因此只會多做而不會少做。
+- 相鄰幀差分（含 SSIM）在 worker 中以同一個函式先算好，再依原始 PTS 順序交給同一個偵測器。每個 worker 只等待前一幀的像素就緒，不等待前一幀的 SSIM，因此動態畫面的 SSIM 仍可平行（640×360 雜訊片 480 px 由單 worker 32 ms/幀降到 8 workers 11.6 ms/幀）。穩定基準與錨點比較仍在偵測器內逐幀執行，錨點差分圖只計算一次。
+
+分析預設使用 8 個前處理 worker、預取 buffer 12 與自動解碼執行緒數（`decoder_threads=0`），三個值定義於 `analysis.py` 的模組常數，基準與監督腳本都從 `analysis_defaults()` 取得，不再各自硬編。流程以固定長度佇列保存尚未取回的工作，最多 buffer 個影格在途，每個尚未開始的工作另保留前一幀解碼影格，因此同時存活的解碼影格約為 buffer + 1（1280×720 約 18 MiB；4K 原片約 160 MiB，接近驗收的 256 MiB 上限），不會把整支影片載入記憶體；取消會停止提交、取消尚未開始的工作並等待執行中的工作結束，關閉執行緒後才釋放 decoder。讀取很慢的磁碟／網路檔案仍可能延遲取消。動態畫面很多的影片每幀都要算 SSIM，即使平行也不會有本原片的加速幅度。
 
 短測可比較 worker 和解碼執行緒配置，不代表完整原片達標：
 
@@ -134,15 +139,15 @@ Python 3.14 的有界 `Executor.map` 在取出結果時最多額外提交一項�
 完整 160 px 舊新版比對及 GUI 三次效能驗收：
 
 ```powershell
-.\.venv\Scripts\python.exe -u scripts/benchmark_analysis.py --full --width 160 --workers 4 --decoder-threads 2 --limit-seconds 300 --output outputs/benchmarks/full160/result.json
-.\.venv\Scripts\python.exe -u scripts/verify_real_video.py --analysis-width 160 --analysis-repeats 3 --analysis-limit 300 --baseline-report outputs/benchmarks/full160/result.json --timeout 1800
+.\.venv\Scripts\python.exe -u scripts/benchmark_analysis.py --full --width 160 --workers 8 --decoder-threads 0 --limit-seconds 120 --output outputs/benchmarks/full160-v2/result.json
+.\.venv\Scripts\python.exe -u scripts/verify_real_video.py --analysis-width 160 --analysis-repeats 3 --analysis-limit 120 --baseline-report outputs/benchmarks/full160-v2/result.json --timeout 1800
 ```
 
-請依序執行，不要同時量測。基準工具需要 Git 與初始提交 `e0dc422`，會從該提交載入獨立舊版程式；沒有安裝在 PATH 的 PortableGit 也可使用目前的本機安裝位置。完整舊版分析本身仍然耗時，不受新版 300 秒門檻限制。
+請依序執行，不要同時量測。基準工具需要 Git 與初始提交 `e0dc422`，會從該提交載入獨立舊版程式；沒有安裝在 PATH 的 PortableGit 也可使用目前的本機安裝位置。完整舊版分析本身仍然耗時，不受新版 120 秒門檻限制。
 
-- 基準報告記錄 Python／套件版本、影片 SHA-256、程式修改雜湊、總時間、前處理 worker 時間、判定時間與 Windows 工作集；平行階段時間不能直接相加當成總時間。
+- 基準報告記錄 Python／套件版本、影片 SHA-256、程式修改雜湊、總時間、前處理 worker 轉圖時間、worker 相鄰幀差分時間、偵測器判定時間與 Windows 工作集；平行階段時間不能直接相加當成總時間，且相同影格沿用像素時不計轉圖時間。
 - 逐幀輸入簽章包含 PTS、尺寸和全部 RGB 像素；曲線以原始雙精度值計算簽章；標記比較全部語意欄位，僅排除隨機 `uid`。不是只比標記數量，也沒有放寬浮點容忍度。
-- GUI 的 `analysis.json`／`result.json` 記錄每次分析秒數、50 ms 心跳最大間隔、取樣記憶體增量、完整結果與取消耗時。`--analysis-limit 300` 要求每次分析低於 300 秒，GUI 心跳間隔低於 1 秒、取消低於 2 秒及工作集取樣增量不超過 256 MiB。
+- GUI 的 `analysis.json`／`result.json` 記錄每次分析秒數、50 ms 心跳最大間隔、取樣記憶體增量、完整結果與取消耗時。`--analysis-limit 120` 要求每次分析低於 120 秒，GUI 心跳間隔低於 1 秒、取消低於 2 秒及工作集取樣增量不超過 256 MiB。
 - 分析計時从索引就緒、啟動工作開始，到 GUI 收到结果並完成工作清理為止，包括診斷用像素雜湊；不包含索引、人工確認、後續縮圖和匯出。`--timeout` 則仍限制整個驗收程序，兩者分開判定。
 - 每次重新開啟解碼器，不使用分析快取；後續執行可能受 OS 檔案快取影響，沒有宣稱清除系統快取。Windows 工作集採樣不是每個瞬間的分配上限，程序歷史峰值另外記錄。
 
@@ -152,13 +157,13 @@ Python 3.14 的有界 `Executor.map` 在取出結果時最多額外提交一項�
 .\.venv\Scripts\python.exe -u scripts/verify_performance.py --width 480 --timeout 5400 --benchmark-timeout 3600 --gui-timeout 1800
 ```
 
-每次建立全新的 `outputs/performance/<日期時間_識別碼>/`，不覆蓋先前中斷紀錄。`--timeout` 為整條流程上限，`--benchmark-timeout` 包含舊版與新版兩次分析；GUI 本身上限為 `--gui-timeout`，外層另保留最多 30 秒清理時間，仍受整體上限約束。480 px 不套用 300 秒門檻，其加速幅度需另外實測。
+每次建立全新的 `outputs/performance/<日期時間_識別碼>/`，不覆蓋先前中斷紀錄。`--timeout` 為整條流程上限，`--benchmark-timeout` 包含舊版與新版兩次分析；GUI 本身上限為 `--gui-timeout`，外層另保留最多 30 秒清理時間，仍受整體上限約束。480 px 不套用 120 秒門檻，其加速幅度需另外實測。
 
 - `result.json`：整體階段、監督 PID／啟動身分、各階段退出碼與最終狀態。
 - `benchmark/status.json`、`gui/status.json`、`regression/status.json`：每 5 秒監督心跳、子程序 PID、耗時、日誌大小及距離上次輸出的秒數；即使子程序沒有輸出仍會更新。監督心跳不是分析正在前進的證據。
 - 各階段 `run.log`：直接保存完整 stdout／stderr，不依赖終端捲動區。突然退出會記錄非零退出碼，退出 0 但沒有有效成功報告也不能算通過。
 - `progress.json`：分析階段、已處理幀、百分比與階段耗時，分析前進時約每 5 秒更新；`benchmark.json` 保留完整比對结果，`gui-results/` 保留 GUI 驗收報告與匯出，`regression.xml` 保留最後一般回歸結果。
-- Windows 的程式內報告讀取使用可共享刪除的快照，寫入使用 `ReplaceFileW`，避免監督讀取阻擋進度檔替換。這只處理配套讀寫程序的並行，不會隱藏真正的檔案權限錯誤。
+- Windows 的程式內報告讀取使用可共享刪除的快照，寫入使用 `ReplaceFileW`，避免監督讀取阻擋進度檔替換；若索引或掃描程式短暫佔用進度檔（共享／鎖定違規或錯誤 1175），寫入會在一秒內重試，其他錯誤仍立即失敗。這只處理配套讀寫程序的並行，不會隱藏真正的檔案權限錯誤。
 - 逾時或 Ctrl+C 會停止本次子程序；Windows 同時終止其子程序樹，避免 GUI 驗收的 pytest 留在背景。沒有程序進度恢復功能，中斷後不能從最後記錄幀接續分析。
 
 查詢時將下面路徑換成該次輸出的實際目錄；這個命令不會啟動或停止測試：

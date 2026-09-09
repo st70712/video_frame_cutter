@@ -1,6 +1,7 @@
 import ctypes
 import json
 import os
+import time
 from contextlib import contextmanager
 
 
@@ -37,9 +38,15 @@ def read_snapshot(path):
         return json.load(stream)
 
 
-def save_snapshot(path, values):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
+# Windows errors raised while another process (indexer, antivirus, a reader without
+# FILE_SHARE_DELETE) briefly holds the snapshot: sharing violation, lock violation and
+# "unable to remove the file to be replaced".
+TRANSIENT_REPLACE_ERRORS = frozenset({32, 33, 1175})
+REPLACE_ATTEMPTS = 20
+REPLACE_RETRY_SECONDS = 0.05
+
+
+def replace_file(path, temporary):
     if os.name == "nt" and path.exists():
         from ctypes import wintypes
 
@@ -53,3 +60,19 @@ def save_snapshot(path, values):
             raise ctypes.WinError(ctypes.get_last_error())
     else:
         temporary.replace(path)
+
+
+def save_snapshot(path, values):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    for attempt in range(1, REPLACE_ATTEMPTS + 1):
+        try:
+            replace_file(path, temporary)
+            return
+        except OSError as error:
+            if (
+                attempt == REPLACE_ATTEMPTS
+                or getattr(error, "winerror", None) not in TRANSIENT_REPLACE_ERRORS
+            ):
+                raise
+            time.sleep(REPLACE_RETRY_SECONDS)
