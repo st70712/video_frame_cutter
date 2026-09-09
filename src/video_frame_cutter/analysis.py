@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import dataclass
 
 import av
@@ -126,30 +128,83 @@ class StableDetector:
         return AnalysisResult(self.markers, self.curve)
 
 
-def analyze(info, settings, cancel=None, progress=lambda value: None):
-    detector = StableDetector(settings)
+def analysis_pixels(frame, aspect, width):
+    if not frame.rotation and (not aspect or aspect == 1):
+        image = Image.fromarray(frame.to_ndarray(format="rgb24"))
+    else:
+        image = display_image(frame, aspect)
+    width = min(width, image.width)
+    height = max(7, round(image.height * width / image.width))
+    return np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
+
+
+def iter_analysis_frames(
+    info, settings, cancel=None, *, workers=4, buffer_size=8, decoder_threads=2,
+):
+    settings.validate()
+    if workers < 1 or buffer_size < workers or decoder_threads < 0:
+        raise ValueError("Invalid analysis pipeline configuration")
+    if not info.frames:
+        raise ValueError("Video contains no indexed frames")
+    check_cancel(cancel)
     with av.open(str(info.path)) as container:
         stream = container.streams[info.stream_index]
         stream.thread_type = "AUTO"
-        last_percent = -1
-        count = 0
-        for index, frame in enumerate(container.decode(stream)):
+        stream.thread_count = decoder_threads
+
+        def decoded():
+            count = 0
+            for index, frame in enumerate(container.decode(stream)):
+                check_cancel(cancel)
+                if index >= len(info.frames) or frame.pts != info.frames[index].pts:
+                    raise ValueError("Video changed since indexing")
+                count += 1
+                yield info.frames[index], frame
+            if count != len(info.frames):
+                raise ValueError("Video ended before all indexed frames were decoded")
+
+        def prepare(item):
             check_cancel(cancel)
-            if index >= len(info.frames) or frame.pts != info.frames[index].pts:
-                raise ValueError("Video changed since indexing")
-            image = display_image(frame, info.aspect)
-            width = min(settings.width, image.width)
-            height = max(7, round(image.height * width / image.width))
-            pixels = np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
-            detector.feed(info.frames[index], pixels)
-            count += 1
-            percent = int(count / len(info.frames) * 100)
+            reference, frame = item
+            pixels = analysis_pixels(frame, info.aspect, settings.width)
+            check_cancel(cancel)
+            return reference, pixels
+
+        if workers == 1:
+            for item in decoded():
+                yield prepare(item)
+        else:
+            executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vfc-analysis")
+            try:
+                with closing(executor.map(prepare, decoded(), buffersize=buffer_size)) as results:
+                    for result in results:
+                        check_cancel(cancel)
+                        yield result
+            finally:
+                executor.shutdown(wait=True, cancel_futures=True)
+
+
+def analyze(
+    info, settings, cancel=None, progress=lambda value: None, *,
+    workers=4, buffer_size=8, decoder_threads=2,
+):
+    detector = StableDetector(settings)
+    last_percent = -1
+    with closing(iter_analysis_frames(
+        info, settings, cancel, workers=workers, buffer_size=buffer_size,
+        decoder_threads=decoder_threads,
+    )) as frames:
+        for count, (reference, pixels) in enumerate(frames, 1):
+            check_cancel(cancel)
+            detector.feed(reference, pixels)
+            percent = min(99, int(count / len(info.frames) * 100))
             if percent != last_percent:
                 progress(percent)
                 last_percent = percent
-        if count != len(info.frames):
-            raise ValueError("Video ended before all indexed frames were decoded")
-    return detector.finish()
+    result = detector.finish()
+    check_cancel(cancel)
+    progress(100)
+    return result
 
 
 def merge_markers(existing, candidates):
