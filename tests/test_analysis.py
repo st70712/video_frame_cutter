@@ -1,6 +1,7 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 
 from video_frame_cutter.analysis import StableDetector, difference, merge_markers
 from video_frame_cutter.models import AnalysisSettings, FrameRef, Marker
@@ -20,6 +21,71 @@ def test_static_and_hard_cut():
     assert [marker.frame.index for marker in result.markers] == [0, 10]
     assert len(result.curve) == 20
     assert all(not marker.review for marker in result.markers)
+
+
+def test_recent_duplicate_window_suppresses_returned_page():
+    page_a = np.full((48, 80, 3), 30, dtype=np.uint8)
+    page_b = np.full_like(page_a, 220)
+
+    result = run_frames(
+        [page_a] * 10 + [page_b] * 10 + [page_a] * 10,
+        duplicate_window_seconds=3.0,
+    )
+
+    assert [marker.frame.index for marker in result.markers] == [0, 10]
+
+
+def test_recent_duplicate_window_can_be_disabled_or_expire():
+    page_a = np.full((48, 80, 3), 30, dtype=np.uint8)
+    page_b = np.full_like(page_a, 220)
+
+    disabled = run_frames(
+        [page_a] * 10 + [page_b] * 10 + [page_a] * 10,
+        duplicate_window_seconds=0.0,
+    )
+    boundary = run_frames(
+        [page_a] * 10 + [page_b] * 20 + [page_a] * 10,
+        duplicate_window_seconds=3.0,
+    )
+    expired = run_frames(
+        [page_a] * 10 + [page_b] * 40 + [page_a] * 10,
+        duplicate_window_seconds=3.0,
+    )
+
+    assert [marker.frame.index for marker in disabled.markers] == [0, 10, 20]
+    assert [marker.frame.index for marker in boundary.markers] == [0, 10]
+    assert [marker.frame.index for marker in expired.markers] == [0, 10, 50]
+
+
+def test_suppressed_duplicates_refresh_their_recent_timestamp():
+    page_a = np.full((48, 80, 3), 30, dtype=np.uint8)
+    page_b = np.full_like(page_a, 220)
+    pages = [page_a] * 10 + [page_b] * 10 + [page_a] * 10 + [page_b] * 10 + [page_a] * 10
+
+    result = run_frames(pages, duplicate_window_seconds=3.0)
+
+    assert [marker.frame.index for marker in result.markers] == [0, 10]
+
+
+def test_minimum_interval_does_not_remember_unmarked_page():
+    page_a = np.full((48, 80, 3), 30, dtype=np.uint8)
+    page_b = np.full_like(page_a, 220)
+    pages = [page_a] * 4 + [page_b] * 4 + [page_a] * 4 + [page_b] * 4
+
+    result = run_frames(
+        pages,
+        stable_seconds=0.1,
+        min_interval=1.0,
+        duplicate_window_seconds=3.0,
+    )
+
+    assert [marker.frame.index for marker in result.markers] == [0, 12]
+
+
+@pytest.mark.parametrize("window", [-0.1, 60.1])
+def test_recent_duplicate_window_must_be_within_range(window):
+    with pytest.raises(ValueError, match="Invalid detection timing"):
+        StableDetector(AnalysisSettings(duplicate_window_seconds=window))
 
 
 def test_cursor_and_slow_transition():

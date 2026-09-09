@@ -39,12 +39,40 @@ class StableDetector:
         self.pending = True
         self.reviewed = False
         self.last_stable = None
+        self.recent_stable = []
         self.markers = []
         self.curve = []
 
     def changed(self, first, second, threshold):
         score, area = difference(first, second, self.settings.area)
         return score >= threshold and area >= self.settings.area
+
+    def duplicate_pixels(self, pixels):
+        if pixels.shape[1] <= 160:
+            return pixels.copy()
+        height = max(1, round(pixels.shape[0] * 160 / pixels.shape[1]))
+        return np.asarray(
+            Image.fromarray(pixels).resize((160, height), Image.Resampling.BILINEAR)
+        ).copy()
+
+    def recently_seen(self, reference, pixels):
+        window = self.settings.duplicate_window_seconds
+        if window == 0:
+            return False
+        self.recent_stable = [
+            entry for entry in self.recent_stable
+            if reference.seconds - entry[1] <= window
+        ]
+        candidate_pixels = self.duplicate_pixels(pixels)
+        for index, (stable_pixels, _) in enumerate(self.recent_stable):
+            if not self.changed(stable_pixels, candidate_pixels, self.settings.threshold):
+                self.recent_stable[index] = (stable_pixels, reference.seconds)
+                return True
+        return False
+
+    def remember_stable(self, reference, pixels):
+        if self.settings.duplicate_window_seconds > 0:
+            self.recent_stable.append((self.duplicate_pixels(pixels), reference.seconds))
 
     def feed(self, reference, pixels):
         if self.previous is None:
@@ -74,7 +102,8 @@ class StableDetector:
                 self.anchor = pixels
                 self.candidate = reference
             elif reference.seconds - self.candidate.seconds >= self.settings.stable_seconds:
-                if (
+                duplicate = self.recently_seen(self.candidate, self.anchor)
+                if not duplicate and (
                     self.last_stable is None
                     or self.candidate.seconds - self.last_stable.seconds
                     >= self.settings.min_interval
@@ -92,6 +121,7 @@ class StableDetector:
                         )
                     )
                     self.last_stable = self.candidate
+                    self.remember_stable(self.candidate, self.anchor)
                 self.baseline = pixels
                 self.pending = False
                 self.peak = 0.0
