@@ -1,5 +1,49 @@
 # 畫面分析效能優化計畫
 
+## 第二輪（2026-09-09）：160 px 全片 120 秒內
+
+分支：`perf/analysis-throughput`，起點 `feature/recent-frame-deduplication`（`6cf464f`）。目標：同一台機器、同一支原片、分析寬度 160 px，全片 60,741 幀在 120 秒內完成，且像素、曲線、標記與舊版逐位元一致。本輪不改演算法與參數語意，所有變更皆為數學上等價的改寫，因此沿用 `scripts/benchmark_analysis.py` 對 `e0dc422` 的簽章比對驗收。
+
+### 瓶頸量測（機器閒置時）
+
+| 項目 | 第一輪程式 | 說明 |
+| --- | --- | --- |
+| 解碼（2 個解碼執行緒） | 1.26 ms/幀 | 自動執行緒數約 0.36 ms/幀 |
+| 流程不含偵測器的上限 | 2.1–2.45 ms/幀（約 128 秒） | 4／6／8 workers 幾乎相同 |
+| `to_ndarray("rgb24")` + `Image.fromarray` | 0.56 + 1.08 ms/幀 | 兩者在 8 執行緒下都幾乎不縮放；跨程序量測顯示 YUV→RGB 全解析度轉換受記憶體頻寬限制（約 3 幀/ms 總量） |
+| Pillow BILINEAR 縮放 | 1.8 ms/幀 | 可平行 |
+| 偵測器 `feed` 主執行緒合計 | 61.8 秒（約 1.0 ms/幀） | SSIM 只有 3,930 次（約 10 秒），其餘是 int16 差分：`changed(baseline)` 56,979 次共 20 秒，每幀 previous 差分約 18 秒 |
+| 相鄰幀 160 px 像素相同 | 94% | 解碼緩衝區逐位元相同者 93.8% |
+
+曾嘗試以 libavfilter 裁成水平條帶再轉圖／縮放（Pillow 兩段式重採樣可逐位元拆開），像素一致但執行緒下反而較慢，未採用。
+
+### 等價改寫
+
+1. `channel_difference`／`changed_fraction`：uint8 `max−min` 取三通道最大值、整數計數除以像素數；與 `np.max(np.abs(int16 差))`、`np.mean(mask)` 逐位元相同（測試 `test_difference_matches_int16_original`），267 µs → 34 µs。相同影格以 `np.array_equal` 短路。
+2. `analysis_pixels`：執行緒區域快取的 `VideoReformatter` 轉 `rgb0`，`Image.frombuffer("RGBX", ..., line_size)` 零拷貝建圖後 BILINEAR 縮放、丟棄第四通道；與舊路徑逐像素相同（含 150 px 寬、line size 有填充的 fixture）。
+3. `frames_identical`：以 uint64 視圖比較解碼影格全部平面緩衝區；相同即沿用前一幀像素與 `(0.0, 0.0)` 差分。比較填充位元組只會造成多餘轉圖，不會誤判相同。
+4. `iter_prepared_frames`：手動有界佇列（deque）取代 `Executor.map`，worker 任務串接前一幀的 future，在 worker 內以同一個 `difference()` 算出相鄰幀分數與面積；`StableDetector.feed(reference, pixels, precomputed=None)` 接受預算值。FIFO 提交順序保證前一個任務永遠先開始，不會死鎖。
+5. 預設 `workers=8, buffer_size=16, decoder_threads=0`；短測與全片量測 4／8／12 workers 差異在 10% 內。
+
+### 結果
+
+| 項目 | 結果 |
+| --- | --- |
+| 舊版（`e0dc422`）全片基準 | 856.74 秒（偵測器 75.49 秒） |
+| 新版全片基準 | 20.51 秒（2,961 幀/秒；偵測器 3.41 秒、worker 前處理合計 13.5 秒） |
+| 簽章 | 像素、曲線、標記與舊版完全一致 |
+| 程序工作集 | 基準前 110.7 MiB、後 114.0 MiB，歷史峰值 254.1 MiB（含舊版基準） |
+| GUI 三次完整分析 | 20.45、20.24、19.92 秒 |
+| GUI 心跳／取消／工作集增量 | 心跳最大間隔 0.070 秒、取消 0.020 秒、取樣工作集增量 122.1–129.0 MiB（上限 256 MiB；比第一輪高，因為預取佇列保留更多解碼影格） |
+| 與 `video.vfc.json` 比對 | 30 個標記的影格、review、score、change_seconds 全部相同；僅 index 60593 的 `included` 不同（檔案中為手動取消勾選） |
+| 一般回歸 | 79 項通過、1 項原片長測依預設跳過；`test_marker_panel_fills_sidebar_and_actions_share_toolbar` 在本機失敗（側欄視口高度 491 < 496，與螢幕尺寸有關，在起點分支同樣失敗，與本輪變更無關） |
+
+報告：`outputs/benchmarks/full160-v2/result.json`、`outputs/verification/gui160-v2/`（僅存本機）。第一次全片基準曾因 `ReplaceFileW` 錯誤 1175（進度檔被其他程序短暫佔用）中止，已讓 `save_snapshot` 對共享／鎖定違規重試一秒。
+
+限制：動態畫面多的影片每幀仍需約 1.7 ms 的 SSIM，且穩定基準／錨點比較留在主執行緒；轉圖受記憶體頻寬限制，只有相同影格多的螢幕錄影能達到本原片的倍率。480 px 未重新量測完整原片。
+
+## 第一輪（2026-09-08）
+
 日期：2026-09-08。狀態：160 px 完整基準與三次 GUI 驗收、480 px 完整比對與 GUI 驗收均通過；最後一般回歸的監督讀寫競態已修正，補跑回歸通過。「實作驗收進度」為實際結果，「規劃階段證據」保留當時的短測紀錄。
 
 開發分支：`perf/frame-analysis`，起點為 `e0dc42235eaf7f7cb8fbcf96f8177e4541c30295`。建立分支前已核對本機提交與 GitHub `main` 相同；本分支尚未提交或推送。
