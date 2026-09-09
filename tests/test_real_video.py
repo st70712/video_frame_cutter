@@ -12,7 +12,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtMultimedia import QMediaPlayer
 
 from scripts.benchmark_analysis import AnalysisRecorder, memory_usage, result_signature, save_report
-from video_frame_cutter.analysis import analyze
+from video_frame_cutter.analysis import analysis_defaults, analyze
 from video_frame_cutter.export import export_markers
 from video_frame_cutter.models import AnalysisSettings, CropRect, ExportSettings
 from video_frame_cutter.project import fingerprint, read_project, save_project, validate_source
@@ -158,7 +158,7 @@ def test_original_video(qtbot, tmp_path, monitored_window):
             "gui_pulses": len(pulses),
             "sampled_memory_increase_bytes": max(memory_samples) - memory_samples[0],
             "memory_after": memory_usage(),
-            "configuration": {"workers": 4, "buffer_size": 8, "decoder_threads": 2},
+            "configuration": analysis_defaults(),
             "signature": signature,
             "matches_baseline": signature == expected_signature if expected_signature else None,
         }

@@ -33,6 +33,22 @@ def test_analysis_pixels_equal_original(video_path, width, aspect):
             assert np.array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("width", [64, 150, 480])
+def test_odd_width_analysis_pixels_equal_original(odd_video_path, width):
+    with av.open(str(odd_video_path)) as container:
+        for frame in container.decode(video=0):
+            assert frame.width == 150
+            plane = frame.reformat(format="rgb0").planes[0]
+            assert plane.line_size > 150 * 4
+            image = display_image(frame)
+            actual_width = min(width, image.width)
+            height = max(7, round(image.height * actual_width / image.width))
+            expected = np.asarray(image.resize((actual_width, height), Image.Resampling.BILINEAR))
+            actual = analysis_pixels(frame, None, width)
+            assert actual.dtype == np.uint8 and actual.flags.c_contiguous
+            assert np.array_equal(actual, expected)
+
+
 def test_rotated_analysis_preserves_display_path():
     class RotatedFrame:
         rotation = 90

@@ -112,11 +112,11 @@ class AnalysisRecorder:
                 super().__init__(settings)
                 recorder.detector = self
 
-            def feed(self, reference, pixels):
+            def feed(self, reference, pixels, *args, **kwargs):
                 recorder.pixel_digest.update(struct.pack("!qII", reference.pts, *pixels.shape[:2]))
                 recorder.pixel_digest.update(memoryview(pixels))
                 started = time.perf_counter()
-                super().feed(reference, pixels)
+                super().feed(reference, pixels, *args, **kwargs)
                 recorder.detector_seconds += time.perf_counter() - started
                 recorder.frames += 1
                 now = time.perf_counter()
