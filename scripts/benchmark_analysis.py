@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -19,6 +20,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from video_frame_cutter import analysis
+from video_frame_cutter.analysis import analysis_defaults
 from video_frame_cutter.models import AnalysisSettings
 from video_frame_cutter.project import fingerprint
 from video_frame_cutter.verification_io import save_snapshot as save_report
@@ -98,6 +100,7 @@ class AnalysisRecorder:
         self.frames = 0
         self.detector_seconds = 0.0
         self.preparation_seconds = 0.0
+        self.difference_worker_seconds = 0.0
         self.lock = Lock()
         self.detector = None
         self.started = self.last_report = time.perf_counter()
@@ -148,6 +151,19 @@ class AnalysisRecorder:
                 return pixels
 
             self.patches.append(patch.object(self.module, "analysis_pixels", prepare))
+        if hasattr(self.module, "prepare_frame"):
+            original_difference = self.module.difference
+
+            def worker_difference(*args, **kwargs):
+                started = time.perf_counter()
+                result = original_difference(*args, **kwargs)
+                if threading.current_thread().name.startswith("vfc-analysis"):
+                    elapsed = time.perf_counter() - started
+                    with self.lock:
+                        self.difference_worker_seconds += elapsed
+                return result
+
+            self.patches.append(patch.object(self.module, "difference", worker_difference))
         for replacement in self.patches:
             replacement.start()
         return self
@@ -181,6 +197,7 @@ def run_pass(module, info, settings, sample_frames=0, progress_callback=None, **
         "frames_per_second": recorder.frames / elapsed,
         "detector_seconds": recorder.detector_seconds,
         "preparation_worker_seconds": recorder.preparation_seconds,
+        "difference_worker_seconds": recorder.difference_worker_seconds,
         "configuration": configuration,
         "memory_before": memory_before, "memory_after": memory_usage(),
         "complete_video": not sample_frames or recorder.frames == len(info.frames),
@@ -192,8 +209,11 @@ def main():
     parser = argparse.ArgumentParser(description="Compare ordered analysis against the original commit")
     parser.add_argument("video", type=Path, nargs="?", default=Path("video.mp4"))
     parser.add_argument("--width", type=int, default=160)
-    parser.add_argument("--workers", type=int, nargs="+", default=[2, 3, 4])
-    parser.add_argument("--decoder-threads", type=int, nargs="+", default=[2])
+    defaults = analysis_defaults()
+    parser.add_argument("--workers", type=int, nargs="+", default=[defaults["workers"]])
+    parser.add_argument(
+        "--decoder-threads", type=int, nargs="+", default=[defaults["decoder_threads"]]
+    )
     parser.add_argument("--sample-frames", type=int, default=600)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--repeats", type=int, default=1)
@@ -270,7 +290,8 @@ def main():
                           flush=True)
                     measured = run_pass(
                         analysis, info, settings, report["sample_frames"], workers=workers,
-                        buffer_size=workers * 2, decoder_threads=decoder_threads,
+                        buffer_size=workers + defaults["buffer_size"] - defaults["workers"],
+                        decoder_threads=decoder_threads,
                         progress_callback=record_progress,
                     )
                     measured["matches_baseline"] = measured["signature"] == reference["signature"]

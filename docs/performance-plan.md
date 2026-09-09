@@ -20,27 +20,34 @@
 ### 等價改寫
 
 1. `channel_difference`／`changed_fraction`：uint8 `max−min` 取三通道最大值、整數計數除以像素數；與 `np.max(np.abs(int16 差))`、`np.mean(mask)` 逐位元相同（測試 `test_difference_matches_int16_original`），267 µs → 34 µs。相同影格以 `np.array_equal` 短路。
-2. `analysis_pixels`：執行緒區域快取的 `VideoReformatter` 轉 `rgb0`，`Image.frombuffer("RGBX", ..., line_size)` 零拷貝建圖後 BILINEAR 縮放、丟棄第四通道；與舊路徑逐像素相同（含 150 px 寬、line size 有填充的 fixture）。
+2. `analysis_pixels`：執行緒區域快取的 `VideoReformatter` 轉 `rgb24`，`Image.frombuffer("RGB", ..., line_size)` 依 stride 讀入後 BILINEAR 縮放；與舊路徑逐像素相同。審查時發現原先採用的 `rgb0` 零拷貝路徑在非 16 倍數寬度（150、162、854、900、1364、1366）與 `rgb24` 不同，最大差到 255，平面顏色 fixture 看不出來；已改回 `rgb24`，並以 162×94 雜訊 fixture 與 9 種尺寸 × 3 種分析寬度的等價檢查確認。
 3. `frames_identical`：以 uint64 視圖比較解碼影格全部平面緩衝區；相同即沿用前一幀像素與 `(0.0, 0.0)` 差分。比較填充位元組只會造成多餘轉圖，不會誤判相同。
-4. `iter_prepared_frames`：手動有界佇列（deque）取代 `Executor.map`，worker 任務串接前一幀的 future，在 worker 內以同一個 `difference()` 算出相鄰幀分數與面積；`StableDetector.feed(reference, pixels, precomputed=None)` 接受預算值。FIFO 提交順序保證前一個任務永遠先開始，不會死鎖。
-5. 預設 `workers=8, buffer_size=16, decoder_threads=0`；短測與全片量測 4／8／12 workers 差異在 10% 內。
+4. `iter_prepared_frames`：手動有界佇列（deque）取代 `Executor.map`，每個 worker 任務（模組層級的 `prepare_frame`）拿到前一幀的「像素就緒」future，像素算好即發布，之後才算相鄰幀 `difference()`；因此後一幀只等前一幀的轉圖，不等它的 SSIM。審查前的版本等待前一幀的完整結果，使 SSIM 退化為序列執行（640×360 雜訊片 480 px：8 workers 與 1 worker 都約 45 ms/幀），修正後為 11.6 對 32 ms/幀。任務被取消或失敗時由 done callback 補發例外，避免後續任務永久等待。`StableDetector.feed(reference, pixels, precomputed=None)` 接受預算值；錨點的差分圖每幀只算一次。
+5. 預設 `workers=8, buffer_size=12, decoder_threads=0` 定義為模組常數，`analysis_defaults()` 供基準、監督腳本與原片測試共用。全片量測 buffer 12 與 16 無差異（22.3 對 22.5 秒），4 workers 為 34.5 秒。
+6. `frames_identical` 另比較 `color_range`／`colorspace`；本機 PyAV 18.1 的轉換不受這些欄位影響，但比較成本極低，可避免未來版本出現沿用錯誤像素。
 
 ### 結果
 
 | 項目 | 結果 |
 | --- | --- |
 | 舊版（`e0dc422`）全片基準 | 856.74 秒（偵測器 75.49 秒） |
-| 新版全片基準 | 20.51 秒（2,961 幀/秒；偵測器 3.41 秒、worker 前處理合計 13.5 秒） |
+| 新版全片基準（審查前，`rgb0` 版本） | 20.51 秒（2,961 幀/秒） |
+| 新版全片基準（審查修正後） | 39.99 秒（1,519 幀/秒；偵測器 9.3 秒、worker 轉圖 29.9 秒、worker 差分 98.4 秒牆鐘總和）。此次緊接在 868 秒舊版基準之後量測，機器已降頻：同一時段單執行緒 SSIM 微基準 2.64 ms，會話開始時為 1.73 ms；同一程式稍早未降頻時直接量測為 22.3 秒 |
 | 簽章 | 像素、曲線、標記與舊版完全一致 |
 | 程序工作集 | 基準前 110.7 MiB、後 114.0 MiB，歷史峰值 254.1 MiB（含舊版基準） |
-| GUI 三次完整分析 | 20.45、20.24、19.92 秒 |
+| GUI 三次完整分析（審查前） | 20.45、20.24、19.92 秒 |
+| GUI 三次完整分析（審查修正後） | 24.19、23.90、23.75 秒（心跳最大間隔 0.076 秒、取消 0.03 秒、取樣工作集增量 141.7–157.0 MiB，簽章與舊版一致） |
 | GUI 心跳／取消／工作集增量 | 心跳最大間隔 0.070 秒、取消 0.020 秒、取樣工作集增量 122.1–129.0 MiB（上限 256 MiB；比第一輪高，因為預取佇列保留更多解碼影格） |
 | 與 `video.vfc.json` 比對 | 30 個標記的影格、review、score、change_seconds 全部相同；僅 index 60593 的 `included` 不同（檔案中為手動取消勾選） |
 | 一般回歸 | 79 項通過、1 項原片長測依預設跳過；`test_marker_panel_fills_sidebar_and_actions_share_toolbar` 在本機失敗（側欄視口高度 491 < 496，與螢幕尺寸有關，在起點分支同樣失敗，與本輪變更無關） |
 
 報告：`outputs/benchmarks/full160-v2/result.json`、`outputs/verification/gui160-v2/`（僅存本機）。第一次全片基準曾因 `ReplaceFileW` 錯誤 1175（進度檔被其他程序短暫佔用）中止，已讓 `save_snapshot` 對共享／鎖定違規重試一秒。
 
-限制：動態畫面多的影片每幀仍需約 1.7 ms 的 SSIM，且穩定基準／錨點比較留在主執行緒；轉圖受記憶體頻寬限制，只有相同影格多的螢幕錄影能達到本原片的倍率。480 px 未重新量測完整原片。
+限制：動態畫面多的影片每幀仍需 SSIM（160 px 約 1.7 ms CPU，可在 worker 平行），穩定基準／錨點比較留在主執行緒；轉圖受記憶體頻寬限制，只有相同影格多的螢幕錄影能達到本原片的倍率。同時存活的解碼影格約 buffer + 1 張，4K 原片約 160 MiB。480 px 未重新量測完整原片。`save_snapshot` 的重試會在分析執行緒睡眠最多 1 秒，僅影響驗收工具的計時，不影響 GUI。
+
+### 審查修正（2026-09-10）
+
+PR 審查發現並修正：`rgb0` 轉圖在非 16 倍數寬度不逐位元一致（改回 `rgb24`，補雜訊 fixture）；worker 串接完整結果造成 SSIM 序列化（改為像素就緒 future）；pipeline 預設值在 `analyze`、`iter_prepared_frames`、`benchmark_analysis.py`、`verify_performance.py` 各自硬編（改為模組常數）；相同影格沿用路徑未被一般測試覆蓋（補 `repeated_video_path` fixture）；錨點差分圖重複計算；README 殘留 300 秒門檻。未處理：`save_snapshot` 重試睡眠在分析執行緒（僅驗收工具）、基準報告的 worker 差分時間改以 `difference_worker_seconds` 另計。
 
 ## 第一輪（2026-09-08）
 

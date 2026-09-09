@@ -1,7 +1,7 @@
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass
-from inspect import signature
+from functools import partial
 from threading import local
 
 import av
@@ -11,7 +11,11 @@ from PIL import Image
 from skimage.metrics import structural_similarity
 
 from .models import AnalysisSettings, Marker
-from .video import check_cancel, display_image
+from .video import Cancelled, check_cancel, display_image
+
+DEFAULT_WORKERS = 8
+DEFAULT_BUFFER_SIZE = 12
+DEFAULT_DECODER_THREADS = 0
 
 
 def channel_difference(first, second):
@@ -36,10 +40,16 @@ def changed_fraction(absolute, minimum):
     return np.count_nonzero(absolute > minimum) / absolute.size
 
 
-def difference(first, second, minimum_area=0.0):
-    if np.array_equal(first, second):
-        return 0.0, 0.0
-    absolute = channel_difference(first, second)
+def difference(first, second, minimum_area=0.0, absolute=None):
+    """Change score and changed area between two analysis images.
+
+    ``absolute`` may pass in ``channel_difference(first, second)`` when the caller already has
+    it; the result is the same either way.
+    """
+    if absolute is None:
+        if np.array_equal(first, second):
+            return 0.0, 0.0
+        absolute = channel_difference(first, second)
     area = changed_fraction(absolute, 20)
     if area < minimum_area or not absolute.any():
         return 0.0, area
@@ -70,8 +80,8 @@ class StableDetector:
         self.markers = []
         self.curve = []
 
-    def changed(self, first, second, threshold):
-        score, area = difference(first, second, self.settings.area)
+    def changed(self, first, second, threshold, absolute=None):
+        score, area = difference(first, second, self.settings.area, absolute)
         return score >= threshold and area >= self.settings.area
 
     def duplicate_pixels(self, pixels):
@@ -123,12 +133,14 @@ class StableDetector:
         if self.pending:
             self.peak = max(self.peak, score)
             stable_threshold = min(0.025, self.settings.threshold * 0.35)
-            if (
-                (score >= stable_threshold and area >= self.settings.area)
-                or self.changed(self.anchor, pixels, stable_threshold)
-                or changed_fraction(channel_difference(self.anchor, pixels), 4)
-                >= max(self.settings.area, 0.001)
-            ):
+            moved = score >= stable_threshold and area >= self.settings.area
+            if not moved:
+                drift = channel_difference(self.anchor, pixels)
+                moved = (
+                    self.changed(self.anchor, pixels, stable_threshold, drift)
+                    or changed_fraction(drift, 4) >= max(self.settings.area, 0.001)
+                )
+            if moved:
                 self.anchor = pixels
                 self.candidate = reference
             elif reference.seconds - self.candidate.seconds >= self.settings.stable_seconds:
@@ -200,37 +212,37 @@ def thread_reformatter():
 
 def analysis_pixels(frame, aspect, width):
     if not frame.rotation and (not aspect or aspect == 1):
-        # Same swscale RGB conversion as ``to_ndarray(format="rgb24")`` with a padding byte, so
-        # Pillow can map the plane without copying; the fourth band is dropped after resizing.
-        converted = thread_reformatter().reformat(frame, format="rgb0")
+        # The same swscale conversion as ``frame.to_ndarray(format="rgb24")``; the cached
+        # reformatter only saves the per-frame context setup, and Pillow reads the plane with
+        # its stride so the only copy is the one Pillow makes. (``rgb0`` output would avoid that
+        # copy but is not bit-identical for widths that are not multiples of 16.)
+        converted = thread_reformatter().reformat(frame, format="rgb24")
         plane = converted.planes[0]
         image = Image.frombuffer(
-            "RGBX", (converted.width, converted.height), plane, "raw", "RGBX", plane.line_size, 1
+            "RGB", (converted.width, converted.height), plane, "raw", "RGB", plane.line_size, 1
         )
-        bands = 3
     else:
         image = display_image(frame, aspect)
-        bands = None
     width = min(width, image.width)
     height = max(7, round(image.height * width / image.width))
-    pixels = np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
-    if bands is not None:
-        pixels = np.ascontiguousarray(pixels[..., :bands])
-    return pixels
+    return np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
 
 
 def frames_identical(first, second):
     """True when two decoded frames carry byte-identical picture buffers.
 
     Identical input produces identical analysis pixels, so the expensive conversion and
-    resize can be skipped. Padding bytes are compared as well; a difference there only costs
-    a redundant conversion, never a wrong result.
+    resize can be skipped. Padding bytes and the colour metadata swscale may consult are
+    compared as well; a difference there only costs a redundant conversion, never a wrong
+    result.
     """
     if (
         first.format.name != second.format.name
         or first.width != second.width
         or first.height != second.height
         or first.rotation != second.rotation
+        or first.color_range != second.color_range
+        or first.colorspace != second.colorspace
         or len(first.planes) != len(second.planes)
     ):
         return False
@@ -251,18 +263,61 @@ def frames_identical(first, second):
 class PreparedFrame:
     reference: object
     pixels: np.ndarray
-    difference: tuple | None
+    difference: tuple
+
+
+def prepare_frame(reference, frame, previous_frame, previous_pixels, pixels_ready, aspect, width,
+                  cancel=None):
+    """Worker task: analysis pixels of ``frame`` plus its difference against the previous frame.
+
+    ``pixels_ready`` is resolved as soon as the pixels exist, so the next frame's task only
+    waits for this conversion and never for this frame's SSIM. ``previous_pixels`` is the
+    previous task's ``pixels_ready`` (``None`` for the first frame).
+    """
+    check_cancel(cancel)
+    if previous_pixels is not None and frames_identical(frame, previous_frame):
+        pixels = previous_pixels.result()
+        pixels_ready.set_result(pixels)
+        return PreparedFrame(reference, pixels, (0.0, 0.0))
+    pixels = analysis_pixels(frame, aspect, width)
+    pixels_ready.set_result(pixels)
+    if previous_pixels is None:
+        return PreparedFrame(reference, pixels, (0.0, 0.0))
+    check_cancel(cancel)
+    return PreparedFrame(reference, pixels, difference(previous_pixels.result(), pixels))
+
+
+def settle_pixels(pixels_ready, future):
+    """Resolve ``pixels_ready`` when its task ends without publishing pixels.
+
+    Cancelled or failed tasks would otherwise leave the next task waiting forever.
+    """
+    if pixels_ready.done():
+        return
+    try:
+        if future.cancelled():
+            pixels_ready.set_exception(Cancelled())
+        else:
+            error = future.exception()
+            pixels_ready.set_exception(
+                error if error is not None else RuntimeError("Frame pixels were not published")
+            )
+    except InvalidStateError:
+        pass
 
 
 def iter_prepared_frames(
-    info, settings, cancel=None, *, workers=8, buffer_size=16, decoder_threads=0,
+    info, settings, cancel=None, *, workers=DEFAULT_WORKERS, buffer_size=DEFAULT_BUFFER_SIZE,
+    decoder_threads=DEFAULT_DECODER_THREADS,
 ):
     """Decode in order and prepare analysis input on a bounded worker pool.
 
     Every yielded item carries the analysis pixels of one indexed frame plus the
     ``difference`` against the previous frame, computed with the very same function the
     detector would otherwise call. Frames whose decoded buffers equal the previous frame
-    reuse its pixels. Items are yielded strictly in presentation order.
+    reuse its pixels. Items are yielded strictly in presentation order; at most
+    ``buffer_size`` frames are in flight, and each un-started task also keeps the previous
+    decoded frame alive.
     """
     settings.validate()
     if workers < 1 or buffer_size < workers or decoder_threads < 0:
@@ -270,26 +325,6 @@ def iter_prepared_frames(
     if not info.frames:
         raise ValueError("Video contains no indexed frames")
     check_cancel(cancel)
-
-    def prepare(reference, frame, previous_frame, previous_future):
-        check_cancel(cancel)
-        if previous_future is not None and frames_identical(frame, previous_frame):
-            previous = previous_future.result()
-            check_cancel(cancel)
-            return PreparedFrame(reference, previous.pixels, (0.0, 0.0))
-        pixels = analysis_pixels(frame, info.aspect, settings.width)
-        check_cancel(cancel)
-        if previous_future is None:
-            return PreparedFrame(reference, pixels, None)
-        previous = previous_future.result()
-        check_cancel(cancel)
-        return PreparedFrame(reference, pixels, difference(previous.pixels, pixels))
-
-    def collect(future):
-        item = future.result()
-        check_cancel(cancel)
-        return item
-
     with av.open(str(info.path)) as container:
         stream = container.streams[info.stream_index]
         stream.thread_type = "AUTO"
@@ -297,25 +332,30 @@ def iter_prepared_frames(
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="vfc-analysis")
         pending = deque()
         try:
-            previous_frame = previous_future = None
+            previous_frame = previous_pixels = None
             count = 0
             for index, frame in enumerate(container.decode(stream)):
                 check_cancel(cancel)
                 if index >= len(info.frames) or frame.pts != info.frames[index].pts:
                     raise ValueError("Video changed since indexing")
                 count += 1
+                pixels_ready = Future()
                 future = executor.submit(
-                    prepare, info.frames[index], frame, previous_frame, previous_future
+                    prepare_frame, info.frames[index], frame, previous_frame, previous_pixels,
+                    pixels_ready, info.aspect, settings.width, cancel,
                 )
+                future.add_done_callback(partial(settle_pixels, pixels_ready))
                 pending.append(future)
-                previous_frame, previous_future = frame, future
+                previous_frame, previous_pixels = frame, pixels_ready
                 if len(pending) >= buffer_size:
-                    yield collect(pending.popleft())
+                    yield pending.popleft().result()
+                    check_cancel(cancel)
             if count != len(info.frames):
                 raise ValueError("Video ended before all indexed frames were decoded")
-            previous_frame = previous_future = None
+            previous_frame = previous_pixels = None
             while pending:
-                yield collect(pending.popleft())
+                yield pending.popleft().result()
+                check_cancel(cancel)
         finally:
             for future in pending:
                 future.cancel()
@@ -328,8 +368,8 @@ def iter_analysis_frames(info, settings, cancel=None, **configuration):
 
 
 def analyze(
-    info, settings, cancel=None, progress=lambda value: None, *,
-    workers=8, buffer_size=16, decoder_threads=0,
+    info, settings, cancel=None, progress=lambda value: None, *, workers=DEFAULT_WORKERS,
+    buffer_size=DEFAULT_BUFFER_SIZE, decoder_threads=DEFAULT_DECODER_THREADS,
 ):
     detector = StableDetector(settings)
     last_percent = -1
@@ -354,9 +394,12 @@ def analyze(
 
 
 def analysis_defaults():
-    """Default pipeline configuration of :func:`analyze`, for reports and tests."""
-    parameters = signature(analyze).parameters
-    return {name: parameters[name].default for name in ("workers", "buffer_size", "decoder_threads")}
+    """Default pipeline configuration of :func:`analyze`, for reports, scripts and tests."""
+    return {
+        "workers": DEFAULT_WORKERS,
+        "buffer_size": DEFAULT_BUFFER_SIZE,
+        "decoder_threads": DEFAULT_DECODER_THREADS,
+    }
 
 
 def merge_markers(existing, candidates):
