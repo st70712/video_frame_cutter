@@ -8,12 +8,9 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
-    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,9 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSlider,
-    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStyle,
@@ -39,7 +34,14 @@ from ..models import AnalysisSettings, ExportSettings, Marker, timecode
 from ..project import fingerprint, read_project, save_project, validate_source
 from ..video import FrameReader, check_cancel, index_video
 from ..workers import Job
-from .widgets import CropDialog, ImageView, Timeline, pixmap
+from .widgets import (
+    AnalysisSettingsDialog,
+    CropDialog,
+    ExportSettingsDialog,
+    ImageView,
+    Timeline,
+    pixmap,
+)
 
 
 class EditMarkers(QUndoCommand):
@@ -80,6 +82,10 @@ class MainWindow(QMainWindow):
         self.thumb_cache = {}
         self.closing = False
         self.refreshing = False
+        self._analysis_settings = AnalysisSettings()
+        self._export_settings = ExportSettings()
+        self.export_kind = "jpg"
+        self.export_selected_only = False
         self.undo_stack = QUndoStack(self)
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
@@ -104,28 +110,45 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         standard = QStyle.StandardPixmap
-        toolbar = QToolBar("專案")
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.addToolBar(toolbar)
+        self.toolbar = QToolBar("專案")
+        self.toolbar.setMovable(False)
+        self.toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(self.toolbar)
         self.open_action = self._action(
-            toolbar, "開啟影片", standard.SP_DialogOpenButton, self.choose_video, "Ctrl+O"
+            self.toolbar, "開啟影片", standard.SP_DialogOpenButton, self.choose_video, "Ctrl+O"
         )
         self.project_action = self._action(
-            toolbar, "開啟專案", standard.SP_DirOpenIcon, self.choose_project, "Ctrl+Shift+O"
+            self.toolbar,
+            "開啟專案",
+            standard.SP_DirOpenIcon,
+            self.choose_project,
+            "Ctrl+Shift+O",
         )
         self.save_action = self._action(
-            toolbar, "儲存專案", standard.SP_DialogSaveButton, self.save, "Ctrl+S"
+            self.toolbar, "儲存專案", standard.SP_DialogSaveButton, self.save, "Ctrl+S"
         )
-        toolbar.addSeparator()
+        self.toolbar.addSeparator()
         undo = self.undo_stack.createUndoAction(self, "復原")
         undo.setIcon(self.style().standardIcon(standard.SP_ArrowBack))
         undo.setShortcut(QKeySequence.StandardKey.Undo)
-        toolbar.addAction(undo)
+        self.toolbar.addAction(undo)
         redo = self.undo_stack.createRedoAction(self, "重做")
         redo.setIcon(self.style().standardIcon(standard.SP_ArrowForward))
         redo.setShortcut(QKeySequence.StandardKey.Redo)
-        toolbar.addAction(redo)
+        self.toolbar.addAction(redo)
+        self.toolbar.addSeparator()
+        self.analyze_action = self._action(
+            self.toolbar,
+            "分析畫面變化",
+            standard.SP_BrowserReload,
+            self.start_analysis,
+        )
+        self.export_action = self._action(
+            self.toolbar,
+            "匯出",
+            standard.SP_DialogSaveButton,
+            self.choose_export,
+        )
 
         self.video_widget = QVideoWidget()
         self.player.setVideoOutput(self.video_widget)
@@ -233,75 +256,20 @@ class MainWindow(QMainWindow):
         position_layout.addWidget(self.position_input)
         position_layout.addWidget(move_button)
 
-        self.threshold = self._decimal(0.001, 1, 0.08, 0.01)
-        self.area = self._decimal(0, 100, 0.8, 0.1)
-        self.stable = self._decimal(0.05, 10, 0.35, 0.05)
-        self.interval = self._decimal(0, 60, 0.5, 0.1)
-        self.analysis_width = QComboBox()
-        for width in (160, 320, 480, 640, 960):
-            self.analysis_width.addItem(str(width), width)
-        self.analysis_width.setCurrentIndex(2)
-        form = QFormLayout()
-        form.addRow("變化門檻", self.threshold)
-        form.addRow("最小變化面積 (%)", self.area)
-        form.addRow("穩定時間 (秒)", self.stable)
-        form.addRow("最小間隔 (秒)", self.interval)
-        form.addRow("分析寬度 (px)", self.analysis_width)
-        self.analyze_button = QPushButton("分析畫面變化")
-        self.analyze_button.setIcon(self.style().standardIcon(standard.SP_BrowserReload))
-        self.analyze_button.clicked.connect(self.start_analysis)
-        self.output_width = QSpinBox()
-        self.output_height = QSpinBox()
-        for control, default in ((self.output_width, 1920), (self.output_height, 1080)):
-            control.setRange(16, 8192)
-            control.setValue(default)
-        self.quality = QSpinBox()
-        self.quality.setRange(1, 100)
-        self.quality.setValue(95)
-        self.timestamp = QCheckBox("投影片顯示時間戳")
-        self.export_selected = QCheckBox("僅匯出選取標記")
-        dimensions = QHBoxLayout()
-        dimensions.addWidget(self.output_width)
-        dimensions.addWidget(QLabel("×"))
-        dimensions.addWidget(self.output_height)
-        export_form = QFormLayout()
-        export_form.addRow("輸出尺寸 (px)", dimensions)
-        export_form.addRow("JPG 品質", self.quality)
-        self.jpg_button = QPushButton("匯出 JPG")
-        self.pptx_button = QPushButton("匯出 PPTX")
-        for button in (self.jpg_button, self.pptx_button):
-            button.setIcon(self.style().standardIcon(standard.SP_DialogSaveButton))
-        self.jpg_button.clicked.connect(lambda: self.choose_export("jpg"))
-        self.pptx_button.clicked.connect(lambda: self.choose_export("pptx"))
-        export_buttons = QHBoxLayout()
-        export_buttons.addWidget(self.jpg_button)
-        export_buttons.addWidget(self.pptx_button)
-
-        settings = QWidget()
-        settings_layout = QVBoxLayout(settings)
-        settings_layout.addWidget(QLabel("畫面分析"))
-        settings_layout.addLayout(form)
-        settings_layout.addWidget(self.analyze_button)
-        settings_layout.addSpacing(12)
-        settings_layout.addWidget(QLabel("截圖匯出"))
-        settings_layout.addLayout(export_form)
-        settings_layout.addWidget(self.timestamp)
-        settings_layout.addWidget(self.export_selected)
-        settings_layout.addLayout(export_buttons)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(settings)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setMinimumHeight(160)
+        self.marker_panel = QWidget()
+        marker_layout = QVBoxLayout(self.marker_panel)
+        marker_layout.setContentsMargins(0, 0, 0, 0)
+        marker_layout.setSpacing(4)
+        marker_layout.addWidget(self.marker_heading)
+        marker_layout.addWidget(marker_tools)
+        marker_layout.addWidget(self.marker_list, 1)
+        marker_layout.addLayout(position_layout)
         right = QWidget()
         right.setMinimumWidth(330)
         right.setMaximumWidth(440)
         right_layout = QVBoxLayout(right)
-        right_layout.addWidget(self.marker_heading)
-        right_layout.addWidget(marker_tools)
-        right_layout.addWidget(self.marker_list, 2)
-        right_layout.addLayout(position_layout)
-        right_layout.addWidget(scroll, 3)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.marker_panel)
         splitter = QSplitter()
         splitter.addWidget(left)
         splitter.addWidget(right)
@@ -355,47 +323,12 @@ class MainWindow(QMainWindow):
             action.setShortcut(key)
             action.triggered.connect(callback)
             self.addAction(action)
-        for control in (
-            self.threshold,
-            self.area,
-            self.stable,
-            self.interval,
-            self.output_width,
-            self.output_height,
-            self.quality,
-        ):
-            control.valueChanged.connect(self.settings_changed)
-        self.analysis_width.currentIndexChanged.connect(self.settings_changed)
-        self.timestamp.toggled.connect(self.settings_changed)
-
-    def _decimal(self, minimum, maximum, value, step):
-        control = QDoubleSpinBox()
-        control.setDecimals(3)
-        control.setRange(minimum, maximum)
-        control.setSingleStep(step)
-        control.setValue(value)
-        return control
 
     def analysis_settings(self):
-        return AnalysisSettings(
-            self.threshold.value(),
-            self.area.value() / 100,
-            self.stable.value(),
-            self.interval.value(),
-            self.analysis_width.currentData(),
-        )
+        return deepcopy(self._analysis_settings)
 
     def export_settings(self):
-        return ExportSettings(
-            self.output_width.value(),
-            self.output_height.value(),
-            self.quality.value(),
-            self.timestamp.isChecked(),
-        )
-
-    def settings_changed(self, *args):
-        if self.info and not self.refreshing:
-            self.dirty = True
+        return deepcopy(self._export_settings)
 
     def _update_controls(self):
         loaded = self.info is not None and not self.loading
@@ -403,9 +336,10 @@ class MainWindow(QMainWindow):
         self.open_action.setEnabled(self.busy_job is None)
         self.project_action.setEnabled(self.busy_job is None)
         self.save_action.setEnabled(available)
-        self.analyze_button.setEnabled(available)
-        self.jpg_button.setEnabled(available and bool(self.markers))
-        self.pptx_button.setEnabled(available and bool(self.markers))
+        self.analyze_action.setEnabled(available)
+        self.export_action.setEnabled(
+            available and any(marker.included for marker in self.markers)
+        )
         self.play_button.setEnabled(loaded)
         self.add_action.setEnabled(loaded)
         selected = bool(self.selected_ids())
@@ -547,24 +481,8 @@ class MainWindow(QMainWindow):
         self.launch_job(load, loaded, "建立影格索引…")
 
     def restore_settings(self, analysis, export):
-        self.refreshing = True
-        for control, value in (
-            (self.threshold, analysis.threshold),
-            (self.area, analysis.area * 100),
-            (self.stable, analysis.stable_seconds),
-            (self.interval, analysis.min_interval),
-            (self.output_width, export.width),
-            (self.output_height, export.height),
-            (self.quality, export.quality),
-        ):
-            control.setValue(value)
-        index = self.analysis_width.findData(analysis.width)
-        if index < 0:
-            self.analysis_width.addItem(str(analysis.width), analysis.width)
-            index = self.analysis_width.count() - 1
-        self.analysis_width.setCurrentIndex(index)
-        self.timestamp.setChecked(export.timestamp)
-        self.refreshing = False
+        self._analysis_settings = deepcopy(analysis)
+        self._export_settings = deepcopy(export)
 
     def choose_project(self):
         if not self.confirm_discard():
@@ -905,7 +823,14 @@ class MainWindow(QMainWindow):
     def start_analysis(self):
         if not self.info or self.busy_job:
             return
-        info, settings = self.info, self.analysis_settings()
+        dialog = AnalysisSettingsDialog(self.analysis_settings(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        if settings != self._analysis_settings:
+            self._analysis_settings = settings
+            self.dirty = True
+        info = self.info
 
         def completed(result):
             answer = QMessageBox.question(
@@ -925,16 +850,33 @@ class MainWindow(QMainWindow):
             "逐幀分析中…",
         )
 
-    def choose_export(self, kind):
+    def choose_export(self):
         if not self.info or self.busy_job:
             return
         selected = self.selected_ids()
+        dialog = ExportSettingsDialog(
+            self.export_settings(),
+            len(selected),
+            self.export_kind,
+            self.export_selected_only,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings()
+        if settings != self._export_settings:
+            self._export_settings = settings
+            self.dirty = True
+        kind = dialog.kind()
+        selected_only = dialog.selected_only.isChecked()
+        self.export_kind = kind
+        self.export_selected_only = selected_only
         markers = deepcopy(
             [
                 marker
                 for marker in self.markers
                 if marker.included
-                and (not self.export_selected.isChecked() or marker.uid in selected)
+                and (not selected_only or marker.uid in selected)
             ]
         )
         if not markers:
@@ -952,7 +894,7 @@ class MainWindow(QMainWindow):
             overwrite = bool(destination and Path(destination).exists())
         if not destination:
             return
-        info, settings = self.info, self.export_settings()
+        info = self.info
         self.launch_job(
             lambda cancel, progress: export_markers(
                 info, markers, settings, destination, kind, cancel, progress, overwrite
