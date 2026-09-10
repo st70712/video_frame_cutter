@@ -1,0 +1,120 @@
+name: Release desktop apps
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            runner: windows-latest
+            artifact: windows-x64
+            python-architecture: x64
+          - label: macOS Apple Silicon
+            runner: macos-14
+            artifact: macos-arm64
+            python-architecture: arm64
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          architecture: ${{ matrix.python-architecture }}
+          cache: pip
+          cache-dependency-path: |
+            requirements-lock.txt
+            requirements-release.txt
+
+      - name: Install release environment
+        run: |
+          python -m pip install --only-binary=:all: -r requirements-release.txt
+          python -m pip install --no-deps -e .
+
+      - name: Check dependencies
+        run: python -m pip check
+
+      - name: Lint
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build native artifact
+        run: python scripts/build_release.py --expected-version "${{ github.ref_name }}"
+
+      - name: Verify Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive release/Video-Frame-Cutter-${{ github.ref_name }}-windows-x64.zip smoke
+          $process = Start-Process `
+            -FilePath smoke/VideoFrameCutter/VideoFrameCutter.exe `
+            -ArgumentList --smoke-test `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) { throw "Frozen application smoke test failed" }
+
+      - name: Verify macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="build/release/dist/Video Frame Cutter.app"
+          executable="$app/Contents/MacOS/VideoFrameCutter"
+          test "$(lipo -archs "$executable")" = "arm64"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          "$executable" --smoke-test
+          hdiutil verify release/Video-Frame-Cutter-${{ github.ref_name }}-macos-arm64.dmg
+
+      - name: Upload native artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download native artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: release-artifacts
+        run: sha256sum Video-Frame-Cutter-* > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          release-artifacts/*
+          --verify-tag
+          --generate-notes
+          --title "Video Frame Cutter ${{ github.ref_name }}"

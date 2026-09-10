@@ -18,12 +18,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=9", "pytest-qt>=4.5", "ruff>=0.14"]
+release = ["pyinstaller==6.22.2"]
 
 [project.gui-scripts]
 video-frame-cutter = "video_frame_cutter.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+video_frame_cutter = ["resources/*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

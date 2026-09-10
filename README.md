@@ -1,6 +1,15 @@
 # 影片擷取工作室
 
-Windows 本機影片標記、裁切與 JPG / PPTX 匯出工具。以 Python 3.14.5、PySide6、PyAV 建立，不修改或重新編碼原始影片。所有分析與輸出均在本機進行。
+Windows 與 macOS 本機影片標記、裁切及 JPG / PPTX 匯出工具。以 Python 3.14.5、PySide6、PyAV 建立，不修改或重新編碼原始影片。所有分析與輸出均在本機進行。
+
+## 安裝發布版
+
+從 GitHub Releases 下載符合平台的檔案：
+
+- Windows 10/11 x64：下載 `Video-Frame-Cutter-vX.Y.Z-windows-x64.zip`，解壓後執行 `VideoFrameCutter.exe`。這是 portable 版本，不需要安裝 Python，也不會建立開始功能表捷徑。
+- macOS 14+ Apple Silicon：下載 `Video-Frame-Cutter-vX.Y.Z-macos-arm64.dmg`，開啟後將 `Video Frame Cutter.app` 拖入 Applications。
+
+每個 Release 都附有 `SHA256SUMS.txt`，可在執行前核對下載檔案。macOS 測試版目前只有 ad-hoc 簽章，尚未經 Apple Developer ID 簽章或公證；第一次啟動若被 Gatekeeper 阻擋，請確認下載來源及 SHA-256 後，在「系統設定 → 隱私權與安全性」選擇仍要打開。不要使用來源不明的重新封裝版本。
 
 ## 啟動
 
@@ -22,7 +31,7 @@ VS Code 安裝 Python 與 Python Debugger 擴充套件後，選擇 **Video Frame
 
 ## 重建開發環境
 
-需求：Windows x64、標準 CPython 3.14.5、可連線至 PyPI。建立環境前先确认實際版本，不要在既有開發环境上重建。
+需求：Windows x64 或 macOS 14+ Apple Silicon、標準 CPython 3.14.5、可連線至 PyPI。建立環境前先確認實際版本，不要在既有開發環境上重建。
 
 ```powershell
 py -3.14 --version
@@ -35,7 +44,9 @@ py -3.14 -m venv .venv
 
 若 `py -3.14` 不是 3.14.5，請使用已安裝的 3.14.5 執行檔完整路徑建立環境。不要為了解決套件問題直接改用另一個 Python 版本。
 
-[requirements-lock.txt](requirements-lock.txt) 是此次 Windows 3.14.5 執行與測試環境的精確版本快照，包含傳遞依賴，但不是含雜湊的供應鏈鎖檔。專案本身另以 editable 模式安裝；隔離建置工具依 [pyproject.toml](pyproject.toml) 安裝。PyAV wheel 內含解碼函式庫，不需另外安裝命令列 FFmpeg。生成 PPTX 不需要先安裝 PowerPoint。
+macOS 請以對應的 `python3.14` 建立 `.venv`，並將上述命令中的 `.venv\Scripts\python.exe` 改為 `.venv/bin/python`。
+
+[requirements-lock.txt](requirements-lock.txt) 是 Python 3.14.5 執行與測試環境的精確版本快照，包含傳遞依賴，但不是含雜湊的供應鏈鎖檔。GitHub Release workflow 會在 Windows x64 與 macOS arm64 原生 runner 重新驗證這組版本。專案本身另以 editable 模式安裝；發布建置工具由 [requirements-release.txt](requirements-release.txt) 固定。PyAV wheel 內含解碼函式庫，不需另外安裝命令列 FFmpeg。生成 PPTX 不需要先安裝 PowerPoint。
 
 ## 操作流程
 
@@ -176,7 +187,7 @@ Windows 查詢會比對監督 PID 與建立時間，避免 PID 重用誤判；�
 
 ## 限制與故障排查
 
-- 不支援影片剪接、多軌編輯、OCR、批次多影片或 EXE 安裝包。
+- 不支援影片剪接、多軌編輯、OCR、批次多影片或 Windows 安裝程式；Windows 發布版為 portable ZIP。
 - 檔案須有可解碼影片與遞增的影格呈現時間戳；格式副檔名不保證 codec 可解碼。無音軌影片仍可截圖，原片驗收素材則預期含音軌。
 - 索引、縮圖與分析可能需要時間；全片索引完成前不能編輯。畫面分數與影格索引會隨片長使用記憶體，但不保存整支影片的全解析度影像。
 - 如果播放失敗，查看視窗狀態列；若精確取幀／匯出失敗，保留錯誤訊息與驗收日誌。不要用重新執行多份驗收來判斷前一份是否還活著。

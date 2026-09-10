@@ -61,7 +61,7 @@ class EditMarkers(QUndoCommand):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("影片擷取工作室")
+        self.setWindowTitle("Video Frame Cutter")
         self.resize(1280, 860)
         self.setMinimumSize(880, 650)
         self.info = None
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         self.marker_list = QListWidget()
         self.marker_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.marker_list.setIconSize(QSize(96, 54))
-        self.marker_list.setMinimumHeight(120)
+        self.marker_list.setMinimumHeight(8 * 62 + 2 * self.marker_list.frameWidth())
         self.marker_list.itemSelectionChanged.connect(self.selection_changed)
         self.marker_list.itemChanged.connect(self.inclusion_changed)
         self.marker_list.itemDoubleClicked.connect(lambda item: self.edit_crop())
