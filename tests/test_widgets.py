@@ -12,14 +12,14 @@ from video_frame_cutter.workers import Job
 
 
 def test_analysis_settings_dialog_roundtrip(qtbot):
-    original = AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640)
+    original = AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0)
     dialog = AnalysisSettingsDialog(original)
     qtbot.addWidget(dialog)
 
     assert dialog.settings() == original
     dialog.threshold.setValue(0.25)
     dialog.reject()
-    assert original == AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640)
+    assert original == AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0)
 
 
 def test_export_settings_dialog_options(qtbot):

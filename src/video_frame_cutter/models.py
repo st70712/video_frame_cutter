@@ -63,11 +63,16 @@ class AnalysisSettings:
     stable_seconds: float = 0.35
     min_interval: float = 0.5
     width: int = 480
+    duplicate_window_seconds: float = 0.0
 
     def validate(self):
         if not (0.001 <= self.threshold <= 1 and 0 <= self.area <= 1):
             raise ValueError("Invalid detection threshold")
-        if not (0.05 <= self.stable_seconds <= 10 and 0 <= self.min_interval <= 60):
+        if not (
+            0.05 <= self.stable_seconds <= 10
+            and 0 <= self.min_interval <= 60
+            and 0 <= self.duplicate_window_seconds <= 60
+        ):
             raise ValueError("Invalid detection timing")
         if not 64 <= self.width <= 1920:
             raise ValueError("Invalid analysis resolution")

@@ -13,24 +13,50 @@ from video_frame_cutter.analysis import (
     StableDetector,
     analysis_pixels,
     analyze,
+    frames_identical,
     iter_analysis_frames,
 )
 from video_frame_cutter.models import AnalysisSettings
 from video_frame_cutter.video import Cancelled, display_image, index_video
 
 
+def expected_analysis_pixels(frame, aspect, width):
+    """The original conversion path: display image, then Pillow BILINEAR resize."""
+    image = display_image(frame, aspect)
+    actual_width = min(width, image.width)
+    height = max(7, round(image.height * actual_width / image.width))
+    return np.asarray(image.resize((actual_width, height), Image.Resampling.BILINEAR))
+
+
+@pytest.mark.parametrize("fixture", ["video_path", "noise_video_path"])
 @pytest.mark.parametrize("width", [64, 160, 480])
 @pytest.mark.parametrize("aspect", [None, Fraction(1), Fraction(4, 3)])
-def test_analysis_pixels_equal_original(video_path, width, aspect):
-    with av.open(str(video_path)) as container:
+def test_analysis_pixels_equal_original(request, fixture, width, aspect):
+    with av.open(str(request.getfixturevalue(fixture))) as container:
         for frame in container.decode(video=0):
-            image = display_image(frame, aspect)
-            actual_width = min(width, image.width)
-            height = max(7, round(image.height * actual_width / image.width))
-            expected = np.asarray(image.resize((actual_width, height), Image.Resampling.BILINEAR))
+            if fixture == "noise_video_path":
+                assert frame.width == 162
+                assert frame.reformat(format="rgb24").planes[0].line_size > 162 * 3
             actual = analysis_pixels(frame, aspect, width)
             assert actual.dtype == np.uint8
-            assert np.array_equal(actual, expected)
+            assert np.array_equal(actual, expected_analysis_pixels(frame, aspect, width))
+
+
+def test_frames_identical_requires_same_bytes_and_colour_metadata():
+    pixels = np.random.default_rng(1).integers(0, 256, (48, 64, 3), dtype=np.uint8)
+    source = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+    first = source.reformat(format="yuv420p")
+    second = source.reformat(format="yuv420p")
+    assert frames_identical(first, second)
+    second.color_range = 1 if first.color_range != 1 else 2
+    assert not frames_identical(first, second)
+    second.color_range = first.color_range
+    assert frames_identical(first, second)
+    other = av.VideoFrame.from_ndarray(pixels[::-1].copy(), format="rgb24").reformat(
+        format="yuv420p"
+    )
+    assert not frames_identical(first, other)
+    assert not frames_identical(first, first.reformat(format="yuv444p"))
 
 
 def test_rotated_analysis_preserves_display_path():
@@ -53,23 +79,28 @@ def marker_values(result):
     ]
 
 
+@pytest.mark.parametrize("fixture", ["video_path", "repeated_video_path", "noise_video_path"])
 @pytest.mark.parametrize("workers", [1, 2, 4])
 @pytest.mark.parametrize("options", [{}, {"area": 0, "threshold": 0.001, "stable_seconds": 5}])
-def test_pipeline_matches_original(video_path, workers, options):
+def test_pipeline_matches_original(request, fixture, workers, options):
+    video_path = request.getfixturevalue(fixture)
     info = index_video(video_path)
     settings = AnalysisSettings(width=160, **options)
     original = StableDetector(settings)
     expected_pixels = []
+    identical_pairs = 0
     with av.open(str(video_path)) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
+        previous = None
         for reference, frame in zip(info.frames, container.decode(stream), strict=True):
-            image = display_image(frame, info.aspect)
-            width = min(settings.width, image.width)
-            height = max(7, round(image.height * width / image.width))
-            pixels = np.asarray(image.resize((width, height), Image.Resampling.BILINEAR))
+            identical_pairs += previous is not None and frames_identical(frame, previous)
+            previous = frame
+            pixels = expected_analysis_pixels(frame, info.aspect, settings.width)
             expected_pixels.append(pixels)
             original.feed(reference, pixels)
+    if fixture == "repeated_video_path":
+        assert identical_pairs >= 10, "fixture must exercise identical-frame reuse"
     actual_frames = list(iter_analysis_frames(info, settings, workers=workers))
     assert [reference for reference, pixels in actual_frames] == info.frames
     for (_, pixels), expected in zip(actual_frames, expected_pixels, strict=True):

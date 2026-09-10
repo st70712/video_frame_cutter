@@ -36,3 +36,29 @@ def test_runner_records_real_exit_and_rejects_skipped(tmp_path, monkeypatch, out
     assert state["exit_code"] == (1 if outcome == "failed" else 0)
     assert state["analysis_width"] == 480
     assert f"STAGE simulated {outcome}" in report.with_name("run.log").read_text()
+
+def test_save_snapshot_retries_transient_windows_replace_errors(tmp_path, monkeypatch):
+    from video_frame_cutter import verification_io
+
+    path = tmp_path / "progress.json"
+    path.write_text("{}", encoding="utf-8")
+    attempts = []
+
+    def flaky_replace(target, temporary):
+        attempts.append(target)
+        if len(attempts) < 3:
+            raise OSError(22, "held by another process", None, 1175)
+        temporary.replace(target)
+
+    monkeypatch.setattr(verification_io, "replace_file", flaky_replace)
+    monkeypatch.setattr(verification_io, "REPLACE_RETRY_SECONDS", 0)
+    verification_io.save_snapshot(path, {"frames": 5})
+    assert len(attempts) == 3
+    assert json.loads(path.read_text(encoding="utf-8")) == {"frames": 5}
+
+    def permanent_failure(target, temporary):
+        raise OSError(13, "access denied", None, 5)
+
+    monkeypatch.setattr(verification_io, "replace_file", permanent_failure)
+    with pytest.raises(OSError, match="access denied"):
+        verification_io.save_snapshot(path, {"frames": 6})

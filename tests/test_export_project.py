@@ -1,3 +1,4 @@
+import json
 from io import BytesIO
 from threading import Event
 
@@ -15,11 +16,12 @@ def test_roundtrip_and_export(video_path, tmp_path):
     info = index_video(video_path)
     markers = [Marker(info.frames[20], crop=CropRect(0.2, 0.1, 0.8, 0.9)), Marker(info.frames[2])]
     settings = ExportSettings(320, 180, 95, True)
+    analysis_settings = AnalysisSettings(duplicate_window_seconds=3.0)
     identity = fingerprint(video_path)
     project = tmp_path / "project.json"
-    save_project(project, info, markers, AnalysisSettings(), settings, identity)
+    save_project(project, info, markers, analysis_settings, settings, identity)
     document, loaded, analysis, export = read_project(project)
-    assert analysis == AnalysisSettings()
+    assert analysis == analysis_settings
     validate_source(document, info, loaded, identity)
     assert loaded == list(reversed(markers))
     assert export == settings
@@ -40,6 +42,13 @@ def test_roundtrip_and_export(video_path, tmp_path):
         assert Image.open(BytesIO(slide.shapes[0].image.blob)).size == (320, 180)
     with pytest.raises(FileExistsError):
         export_markers(info, markers, settings, output, "pptx")
+
+    legacy_document = json.loads(project.read_text(encoding="utf-8"))
+    legacy_document["analysis"].pop("duplicate_window_seconds")
+    legacy_project = tmp_path / "legacy-project.json"
+    legacy_project.write_text(json.dumps(legacy_document), encoding="utf-8")
+    _, _, legacy_analysis, _ = read_project(legacy_project)
+    assert legacy_analysis.duplicate_window_seconds == 0.0
 
 
 def test_cancel_and_source_protection(video_path, tmp_path):

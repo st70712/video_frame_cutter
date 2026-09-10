@@ -316,6 +316,10 @@ class AnalysisSettingsDialog(QDialog):
         self.threshold = self._decimal(0.001, 1, settings.threshold, 0.01)
         self.area = self._decimal(0, 100, settings.area * 100, 0.1)
         self.stable = self._decimal(0.05, 10, settings.stable_seconds, 0.05)
+        self.duplicate_window = self._decimal(
+            0, 60, settings.duplicate_window_seconds, 0.1
+        )
+        self.duplicate_window.setSpecialValueText("關閉")
         self.interval = self._decimal(0, 60, settings.min_interval, 0.1)
         self.width = QComboBox()
         widths = [160, 320, 480, 640, 960]
@@ -329,6 +333,7 @@ class AnalysisSettingsDialog(QDialog):
         form.addRow("變化門檻", self.threshold)
         form.addRow("最小變化面積 (%)", self.area)
         form.addRow("穩定時間 (秒)", self.stable)
+        form.addRow("重複畫面忽略時間 (秒)", self.duplicate_window)
         form.addRow("最小間隔 (秒)", self.interval)
         form.addRow("分析寬度 (px)", self.width)
         buttons = QDialogButtonBox(
@@ -352,11 +357,12 @@ class AnalysisSettingsDialog(QDialog):
 
     def settings(self):
         return AnalysisSettings(
-            self.threshold.value(),
-            self.area.value() / 100,
-            self.stable.value(),
-            self.interval.value(),
-            self.width.currentData(),
+            threshold=self.threshold.value(),
+            area=self.area.value() / 100,
+            stable_seconds=self.stable.value(),
+            min_interval=self.interval.value(),
+            width=self.width.currentData(),
+            duplicate_window_seconds=self.duplicate_window.value(),
         )
 
 
