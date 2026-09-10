@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
         self.marker_list = QListWidget()
         self.marker_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.marker_list.setIconSize(QSize(96, 54))
-        self.marker_list.setMinimumHeight(8 * 62 + 2 * self.marker_list.frameWidth())
+        self.marker_list.setMinimumHeight(8 * 62 + 2 * self.marker_list.frameWidth() + 2)
         self.marker_list.itemSelectionChanged.connect(self.selection_changed)
         self.marker_list.itemChanged.connect(self.inclusion_changed)
         self.marker_list.itemDoubleClicked.connect(lambda item: self.edit_crop())

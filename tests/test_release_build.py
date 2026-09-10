@@ -87,6 +87,7 @@ def test_package_windows_includes_readme(tmp_path, monkeypatch):
     monkeypatch.setattr(build_release, "PROJECT_ROOT", project_root)
     monkeypatch.setattr(build_release, "BUILD_ROOT", project_root / "build" / "release")
     monkeypatch.setattr(build_release, "RELEASE_ROOT", project_root / "release")
+    monkeypatch.setattr(build_release, "current_target", lambda: ("macos", "arm64"))
     build_release.RELEASE_ROOT.mkdir()
 
     artifact = build_release.package_windows("1.2.3")

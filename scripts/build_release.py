@@ -101,7 +101,7 @@ def package_windows(version):
     if not executable.is_file():
         raise FileNotFoundError(f"PyInstaller output is missing: {executable}")
     shutil.copy2(PROJECT_ROOT / "README.md", bundle / "README.md")
-    archive_base = RELEASE_ROOT / artifact_name(version).removesuffix(".zip")
+    archive_base = RELEASE_ROOT / artifact_name(version, ("windows", "x64")).removesuffix(".zip")
     return Path(
         shutil.make_archive(str(archive_base), "zip", root_dir=bundle.parent, base_dir=bundle.name)
     )
@@ -116,7 +116,7 @@ def package_macos(version):
     staging.mkdir(parents=True)
     shutil.copytree(application, staging / application.name, symlinks=True)
     (staging / "Applications").symlink_to("/Applications", target_is_directory=True)
-    artifact = RELEASE_ROOT / artifact_name(version)
+    artifact = RELEASE_ROOT / artifact_name(version, ("macos", "arm64"))
     subprocess.run(
         [
             "hdiutil",

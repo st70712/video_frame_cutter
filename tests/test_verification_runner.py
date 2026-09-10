@@ -47,7 +47,9 @@ def test_save_snapshot_retries_transient_windows_replace_errors(tmp_path, monkey
     def flaky_replace(target, temporary):
         attempts.append(target)
         if len(attempts) < 3:
-            raise OSError(22, "held by another process", None, 1175)
+            error = OSError(22, "held by another process")
+            error.winerror = 1175
+            raise error
         temporary.replace(target)
 
     monkeypatch.setattr(verification_io, "replace_file", flaky_replace)
@@ -57,7 +59,9 @@ def test_save_snapshot_retries_transient_windows_replace_errors(tmp_path, monkey
     assert json.loads(path.read_text(encoding="utf-8")) == {"frames": 5}
 
     def permanent_failure(target, temporary):
-        raise OSError(13, "access denied", None, 5)
+        error = OSError(13, "access denied")
+        error.winerror = 5
+        raise error
 
     monkeypatch.setattr(verification_io, "replace_file", permanent_failure)
     with pytest.raises(OSError, match="access denied"):
