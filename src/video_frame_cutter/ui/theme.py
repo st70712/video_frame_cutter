@@ -7,7 +7,7 @@ widgets read :func:`current` at paint time so a system theme change repaints the
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSettings, QSize, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 
 
@@ -75,7 +75,10 @@ DARK = Theme(
     playhead="#ef6a63",
 )
 
+PREFERENCES = ("system", "light", "dark")
+SETTINGS_KEY = "appearance/theme"
 _current = LIGHT
+_preference = "system"
 
 
 def current():
@@ -162,6 +165,37 @@ def apply(app, scheme=None):
     return _current
 
 
+def settings():
+    return QSettings()
+
+
+def preference():
+    return _preference
+
+
+def scheme_for(app, preference):
+    if preference == "light":
+        return Qt.ColorScheme.Light
+    if preference == "dark":
+        return Qt.ColorScheme.Dark
+    return detect(app)
+
+
+def set_preference(app, preference):
+    """Apply ``system``, ``light`` or ``dark`` and remember it for the next launch."""
+    global _preference
+    if preference not in PREFERENCES:
+        raise ValueError(f"unknown theme preference: {preference!r}")
+    _preference = preference
+    settings().setValue(SETTINGS_KEY, preference)
+    return apply(app, scheme_for(app, preference))
+
+
 def install(app):
-    app.styleHints().colorSchemeChanged.connect(lambda scheme: apply(app, scheme))
-    return apply(app)
+    global _preference
+    stored = settings().value(SETTINGS_KEY, "system")
+    _preference = stored if stored in PREFERENCES else "system"
+    app.styleHints().colorSchemeChanged.connect(
+        lambda scheme: apply(app, scheme) if _preference == "system" else None
+    )
+    return apply(app, scheme_for(app, _preference))

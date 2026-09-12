@@ -3,11 +3,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -150,6 +153,8 @@ class MainWindow(QMainWindow):
             standard.SP_DialogSaveButton,
             self.choose_export,
         )
+        self.toolbar.addSeparator()
+        self._build_theme_menu(standard)
 
         self.video_widget = QVideoWidget()
         self.player.setVideoOutput(self.video_widget)
@@ -324,6 +329,31 @@ class MainWindow(QMainWindow):
             action.setShortcut(key)
             action.triggered.connect(callback)
             self.addAction(action)
+
+    def _build_theme_menu(self, standard):
+        menu = QMenu(self)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self.theme_actions = {}
+        for preference, text in (("system", "跟隨系統"), ("light", "淺色"), ("dark", "深色")):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.setChecked(preference == theme.preference())
+            action.triggered.connect(lambda checked, value=preference: self.set_theme(value))
+            group.addAction(action)
+            menu.addAction(action)
+            self.theme_actions[preference] = action
+        self.theme_action = QAction(self.style().standardIcon(standard.SP_DesktopIcon), "外觀", self)
+        self.theme_action.setToolTip("外觀：跟隨系統、淺色或深色主題")
+        self.theme_action.setMenu(menu)
+        self.toolbar.addAction(self.theme_action)
+        self.toolbar.widgetForAction(self.theme_action).setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+
+    def set_theme(self, preference):
+        theme.set_preference(QApplication.instance(), preference)
+        self.theme_actions[preference].setChecked(True)
 
     def _button_icon(self, standard):
         return theme.with_disabled_glyph(self.style().standardIcon(standard))

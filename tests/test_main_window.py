@@ -26,6 +26,8 @@ def test_marker_panel_fills_sidebar_and_actions_share_toolbar(qtbot):
         "",
         "分析畫面變化",
         "匯出",
+        "",
+        "外觀",
     ]
     assert window.marker_list.viewport().height() >= 8 * 62
 
