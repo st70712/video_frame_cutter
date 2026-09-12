@@ -3,11 +3,12 @@ from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import QItemSelectionModel, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -34,6 +37,7 @@ from ..models import AnalysisSettings, ExportSettings, Marker, timecode
 from ..project import fingerprint, read_project, save_project, validate_source
 from ..video import FrameReader, check_cancel, index_video
 from ..workers import Job
+from . import theme
 from .widgets import (
     AnalysisSettingsDialog,
     CropDialog,
@@ -149,6 +153,8 @@ class MainWindow(QMainWindow):
             standard.SP_DialogSaveButton,
             self.choose_export,
         )
+        self.toolbar.addSeparator()
+        self._build_theme_menu(standard)
 
         self.video_widget = QVideoWidget()
         self.player.setVideoOutput(self.video_widget)
@@ -164,22 +170,22 @@ class MainWindow(QMainWindow):
         self.preview.setMinimumSize(300, 200)
         self.play_button = QPushButton()
         self.play_button.setFixedSize(40, 32)
-        self.play_button.setIcon(self.style().standardIcon(standard.SP_MediaPlay))
+        self.play_button.setIcon(self._button_icon(standard.SP_MediaPlay))
         self.play_button.setToolTip("播放／暫停 (Space)")
         self.play_button.clicked.connect(self.toggle_play)
         previous = QPushButton()
-        previous.setIcon(self.style().standardIcon(standard.SP_MediaSkipBackward))
+        previous.setIcon(self._button_icon(standard.SP_MediaSkipBackward))
         previous.setToolTip("上一幀 (Left)")
         previous.clicked.connect(lambda: self.step(-1))
         following = QPushButton()
-        following.setIcon(self.style().standardIcon(standard.SP_MediaSkipForward))
+        following.setIcon(self._button_icon(standard.SP_MediaSkipForward))
         following.setToolTip("下一幀 (Right)")
         following.clicked.connect(lambda: self.step(1))
         self.clock = QLabel("00:00:00.000 / 00:00:00.000")
         self.clock.setMinimumWidth(210)
         self.mute = QPushButton()
         self.mute.setCheckable(True)
-        self.mute.setIcon(self.style().standardIcon(standard.SP_MediaVolume))
+        self.mute.setIcon(self._button_icon(standard.SP_MediaVolume))
         self.mute.setToolTip("靜音")
         self.mute.toggled.connect(self.set_muted)
         self.volume = QSlider(Qt.Orientation.Horizontal)
@@ -286,11 +292,11 @@ class MainWindow(QMainWindow):
         self.pan.valueChanged.connect(self.pan_timeline)
         self.pan.setToolTip("時間軸平移")
         zoom_out = QPushButton()
-        zoom_out.setIcon(self.style().standardIcon(standard.SP_ArrowLeft))
+        zoom_out.setIcon(self._button_icon(standard.SP_ArrowLeft))
         zoom_out.setToolTip("縮小時間軸")
         zoom_out.clicked.connect(lambda: self.timeline.set_zoom(self.timeline.zoom / 1.5))
         zoom_in = QPushButton()
-        zoom_in.setIcon(self.style().standardIcon(standard.SP_ArrowRight))
+        zoom_in.setIcon(self._button_icon(standard.SP_ArrowRight))
         zoom_in.setToolTip("放大時間軸")
         zoom_in.clicked.connect(lambda: self.timeline.set_zoom(self.timeline.zoom * 1.5))
         fit = QPushButton("全片")
@@ -323,6 +329,34 @@ class MainWindow(QMainWindow):
             action.setShortcut(key)
             action.triggered.connect(callback)
             self.addAction(action)
+
+    def _build_theme_menu(self, standard):
+        menu = QMenu(self)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        self.theme_actions = {}
+        for preference, text in (("system", "跟隨系統"), ("light", "淺色"), ("dark", "深色")):
+            action = QAction(text, self)
+            action.setCheckable(True)
+            action.setChecked(preference == theme.preference())
+            action.triggered.connect(lambda checked, value=preference: self.set_theme(value))
+            group.addAction(action)
+            menu.addAction(action)
+            self.theme_actions[preference] = action
+        self.theme_action = QAction(self.style().standardIcon(standard.SP_DesktopIcon), "外觀", self)
+        self.theme_action.setToolTip("外觀：跟隨系統、淺色或深色主題")
+        self.theme_action.setMenu(menu)
+        self.toolbar.addAction(self.theme_action)
+        self.toolbar.widgetForAction(self.theme_action).setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+
+    def set_theme(self, preference):
+        theme.set_preference(QApplication.instance(), preference)
+        self.theme_actions[preference].setChecked(True)
+
+    def _button_icon(self, standard):
+        return theme.with_disabled_glyph(self.style().standardIcon(standard))
 
     def analysis_settings(self):
         return deepcopy(self._analysis_settings)
@@ -544,14 +578,14 @@ class MainWindow(QMainWindow):
             if muted
             else QStyle.StandardPixmap.SP_MediaVolume
         )
-        self.mute.setIcon(self.style().standardIcon(icon))
+        self.mute.setIcon(self._button_icon(icon))
 
     def playback_state(self, state):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         icon = (
             QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay
         )
-        self.play_button.setIcon(self.style().standardIcon(icon))
+        self.play_button.setIcon(self._button_icon(icon))
 
     def playback_position(self, milliseconds):
         if self.info and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
