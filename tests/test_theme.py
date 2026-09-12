@@ -1,7 +1,7 @@
 import pytest
-from PySide6.QtCore import QSettings, Qt
-from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QPushButton, QStyle, QWidget
+from PySide6.QtCore import QSettings, QSize, Qt
+from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtWidgets import QStyle
 
 from video_frame_cutter.__main__ import configure_application
 from video_frame_cutter.models import AnalysisSettings
@@ -93,28 +93,15 @@ def test_timeline_paints_theme_background(app, qtbot, scheme):
     assert image.pixelColor(image.width() - 3, image.height() - 3).name() == colors.timeline_bg
 
 
-def test_disabled_standard_icon_stays_visible_in_dark(app, qtbot):
+def test_disabled_standard_icon_has_a_visible_glyph(app):
     theme.apply(app, Qt.ColorScheme.Dark)
-    container = QWidget()
-    qtbot.addWidget(container)
-    container.resize(40, 32)
-    button = QPushButton(container)
-    button.setGeometry(0, 0, 40, 32)
-    icon = theme.with_disabled_glyph(
-        button.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
-    )
-    button.setIcon(icon)
-    button.setEnabled(False)
-    image = container.grab().toImage()
-    face = image.pixelColor(6, 16)
-    assert face.lightness() < 96
-    contrasting = sum(
-        1
-        for x in range(image.width())
-        for y in range(image.height())
-        if abs(image.pixelColor(x, y).lightness() - face.lightness()) > 30
-    )
-    assert contrasting > 20
+    icon = theme.with_disabled_glyph(app.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+    image = icon.pixmap(QSize(16, 16), QIcon.Mode.Disabled).toImage()
+    centre = image.pixelColor(image.width() // 2, image.height() // 2)
+    assert centre.alpha() > 0
+    assert centre.name() == theme.DISABLED_GLYPH
+    for colors in (theme.LIGHT, theme.DARK):
+        assert contrast(theme.DISABLED_GLYPH, colors.button) >= 2.5
 
 
 def test_configure_application_follows_system_scheme(app):
