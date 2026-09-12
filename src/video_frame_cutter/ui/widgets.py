@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import AnalysisSettings, CropRect, ExportSettings, timecode
+from . import theme
 
 
 def pixmap(image):
@@ -106,8 +107,9 @@ class Timeline(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor("#f0f2f2"))
-        painter.setPen(QColor("#566160"))
+        colors = theme.current()
+        painter.fillRect(self.rect(), QColor(colors.timeline_bg))
+        painter.setPen(QColor(colors.timeline_fg))
         for index in range(6):
             seconds = self.start + self.span * index / 5
             position = self.screen_x(seconds)
@@ -128,7 +130,7 @@ class Timeline(QWidget):
             position = int(self.screen_x(seconds))
             if 0 <= position < self.width():
                 columns[position] = max(columns.get(position, 0), min(1, score))
-        painter.setPen(QPen(QColor("#269486"), 1))
+        painter.setPen(QPen(QColor(colors.curve), 1))
         for position, score in columns.items():
             painter.drawLine(QPointF(position, 130), QPointF(position, 130 - score * 40))
         for marker in self.markers:
@@ -139,13 +141,13 @@ class Timeline(QWidget):
             )
             position = self.screen_x(seconds)
             if 0 <= position < self.width():
-                color = "#be6d22" if marker.review else "#147c6f"
-                painter.setPen(QPen(QColor(color), 3 if marker.uid in self.selected_ids else 1))
+                color = QColor(colors.marker_review if marker.review else colors.marker)
+                painter.setPen(QPen(color, 3 if marker.uid in self.selected_ids else 1))
                 painter.drawLine(QPointF(position, 28), QPointF(position, 142))
-                painter.setBrush(QColor(color) if marker.included else QColor("#ffffff"))
+                painter.setBrush(color if marker.included else QColor(colors.timeline_bg))
                 painter.drawEllipse(QPointF(position, 94), 6, 6)
         position = self.screen_x(self.position)
-        painter.setPen(QPen(QColor("#cc4e48"), 2))
+        painter.setPen(QPen(QColor(colors.playhead), 2))
         painter.drawLine(QPointF(position, 22), QPointF(position, self.height()))
 
     def mousePressEvent(self, event):

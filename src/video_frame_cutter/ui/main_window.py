@@ -34,6 +34,7 @@ from ..models import AnalysisSettings, ExportSettings, Marker, timecode
 from ..project import fingerprint, read_project, save_project, validate_source
 from ..video import FrameReader, check_cancel, index_video
 from ..workers import Job
+from . import theme
 from .widgets import (
     AnalysisSettingsDialog,
     CropDialog,
@@ -164,22 +165,22 @@ class MainWindow(QMainWindow):
         self.preview.setMinimumSize(300, 200)
         self.play_button = QPushButton()
         self.play_button.setFixedSize(40, 32)
-        self.play_button.setIcon(self.style().standardIcon(standard.SP_MediaPlay))
+        self.play_button.setIcon(self._button_icon(standard.SP_MediaPlay))
         self.play_button.setToolTip("播放／暫停 (Space)")
         self.play_button.clicked.connect(self.toggle_play)
         previous = QPushButton()
-        previous.setIcon(self.style().standardIcon(standard.SP_MediaSkipBackward))
+        previous.setIcon(self._button_icon(standard.SP_MediaSkipBackward))
         previous.setToolTip("上一幀 (Left)")
         previous.clicked.connect(lambda: self.step(-1))
         following = QPushButton()
-        following.setIcon(self.style().standardIcon(standard.SP_MediaSkipForward))
+        following.setIcon(self._button_icon(standard.SP_MediaSkipForward))
         following.setToolTip("下一幀 (Right)")
         following.clicked.connect(lambda: self.step(1))
         self.clock = QLabel("00:00:00.000 / 00:00:00.000")
         self.clock.setMinimumWidth(210)
         self.mute = QPushButton()
         self.mute.setCheckable(True)
-        self.mute.setIcon(self.style().standardIcon(standard.SP_MediaVolume))
+        self.mute.setIcon(self._button_icon(standard.SP_MediaVolume))
         self.mute.setToolTip("靜音")
         self.mute.toggled.connect(self.set_muted)
         self.volume = QSlider(Qt.Orientation.Horizontal)
@@ -286,11 +287,11 @@ class MainWindow(QMainWindow):
         self.pan.valueChanged.connect(self.pan_timeline)
         self.pan.setToolTip("時間軸平移")
         zoom_out = QPushButton()
-        zoom_out.setIcon(self.style().standardIcon(standard.SP_ArrowLeft))
+        zoom_out.setIcon(self._button_icon(standard.SP_ArrowLeft))
         zoom_out.setToolTip("縮小時間軸")
         zoom_out.clicked.connect(lambda: self.timeline.set_zoom(self.timeline.zoom / 1.5))
         zoom_in = QPushButton()
-        zoom_in.setIcon(self.style().standardIcon(standard.SP_ArrowRight))
+        zoom_in.setIcon(self._button_icon(standard.SP_ArrowRight))
         zoom_in.setToolTip("放大時間軸")
         zoom_in.clicked.connect(lambda: self.timeline.set_zoom(self.timeline.zoom * 1.5))
         fit = QPushButton("全片")
@@ -323,6 +324,9 @@ class MainWindow(QMainWindow):
             action.setShortcut(key)
             action.triggered.connect(callback)
             self.addAction(action)
+
+    def _button_icon(self, standard):
+        return theme.with_disabled_glyph(self.style().standardIcon(standard))
 
     def analysis_settings(self):
         return deepcopy(self._analysis_settings)
@@ -544,14 +548,14 @@ class MainWindow(QMainWindow):
             if muted
             else QStyle.StandardPixmap.SP_MediaVolume
         )
-        self.mute.setIcon(self.style().standardIcon(icon))
+        self.mute.setIcon(self._button_icon(icon))
 
     def playback_state(self, state):
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         icon = (
             QStyle.StandardPixmap.SP_MediaPause if playing else QStyle.StandardPixmap.SP_MediaPlay
         )
-        self.play_button.setIcon(self.style().standardIcon(icon))
+        self.play_button.setIcon(self._button_icon(icon))
 
     def playback_position(self, milliseconds):
         if self.info and self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
