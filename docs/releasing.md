@@ -30,6 +30,12 @@
 
 `release.yml` 在原生 `windows-latest` 與 `macos-14` runner 上安裝 Python 3.14 及 binary wheels，執行依賴檢查、Ruff、一般測試、PyInstaller 建置與 frozen smoke test。macOS 另檢查 Mach-O arm64 架構、ad-hoc code signature 及 DMG 完整性。
 
+一般 frozen smoke test 之外，兩個平台都會執行 `--webengine-smoke-test`，以實際
+載入本機 HTML 驗證 `QtWebEngineProcess`、framework、resources 與 locales 已納入
+發布包。實機發布驗收仍應開啟「從 EE-Class 下載」，確認登入頁正常呈現、Cookie
+可跨重啟沿用及清除，並以有權限的測試帳號完成 MP4 下載；不得將帳密、Cookie、
+Authorization header 或完整 signed URL 寫入建置日誌與 issue。
+
 兩平台都通過後，publish job 才建立 GitHub Release，內容包含：
 
 - `Video-Frame-Cutter-vX.Y.Z-windows-x64.zip`

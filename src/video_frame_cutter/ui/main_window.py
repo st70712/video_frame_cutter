@@ -32,12 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from ..analysis import analyze, merge_markers
+from ..eeclass import download_eeclass_mp4
 from ..export import export_markers
 from ..models import AnalysisSettings, ExportSettings, Marker, timecode
 from ..project import fingerprint, read_project, save_project, validate_source
 from ..video import FrameReader, check_cancel, index_video
 from ..workers import Job
 from . import theme
+from .eeclass_dialog import EeclassDownloadDialog, create_eeclass_profile
 from .widgets import (
     AnalysisSettingsDialog,
     CropDialog,
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
         self.preview_job = None
         self.thumb_job = None
         self.thumb_cache = {}
+        self.eeclass_profile = None
         self.closing = False
         self.refreshing = False
         self._analysis_settings = AnalysisSettings()
@@ -120,6 +123,12 @@ class MainWindow(QMainWindow):
         self.addToolBar(self.toolbar)
         self.open_action = self._action(
             self.toolbar, "開啟影片", standard.SP_DialogOpenButton, self.choose_video, "Ctrl+O"
+        )
+        self.download_action = self._action(
+            self.toolbar,
+            "從 EE-Class 下載",
+            standard.SP_ArrowDown,
+            self.choose_eeclass_video,
         )
         self.project_action = self._action(
             self.toolbar,
@@ -368,6 +377,7 @@ class MainWindow(QMainWindow):
         loaded = self.info is not None and not self.loading
         available = loaded and self.busy_job is None
         self.open_action.setEnabled(self.busy_job is None)
+        self.download_action.setEnabled(self.busy_job is None)
         self.project_action.setEnabled(self.busy_job is None)
         self.save_action.setEnabled(available)
         self.analyze_action.setEnabled(available)
@@ -463,7 +473,38 @@ class MainWindow(QMainWindow):
         if path:
             self.load_video(path)
 
+    def choose_eeclass_video(self):
+        if not self.confirm_discard():
+            return
+        if self.eeclass_profile is None:
+            self.eeclass_profile = create_eeclass_profile(self)
+        dialog = EeclassDownloadDialog(self.eeclass_profile, self)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        media, destination = dialog.selection()
+        dialog.deleteLater()
+        if not accepted:
+            return
+        if media is None or destination is None:
+            return
+        self._start_video_load(
+            destination,
+            prepare=lambda cancel, progress: download_eeclass_mp4(
+                media, destination, cancel, progress
+            ),
+            title="下載影片並建立影格索引…",
+        )
+
     def load_video(self, path, saved=None, project_path=None):
+        self._start_video_load(path, saved, project_path)
+
+    def _start_video_load(
+        self,
+        path,
+        saved=None,
+        project_path=None,
+        prepare=None,
+        title="建立影格索引…",
+    ):
         if self.busy_job is not None:
             return
         self.player.stop()
@@ -473,12 +514,19 @@ class MainWindow(QMainWindow):
             job.cancel.set()
 
         def load(cancel, progress):
-            info = index_video(path, cancel, progress)
+            source = Path(path)
+            if prepare is not None:
+                source = Path(prepare(cancel, lambda value: progress(value * 60 // 100)))
+                index_progress = lambda value: progress(60 + value * 35 // 100)
+            else:
+                index_progress = lambda value: progress(value * 95 // 100)
+            info = index_video(source, cancel, index_progress)
             check_cancel(cancel)
-            identity = fingerprint(path)
+            identity = fingerprint(source)
             check_cancel(cancel)
             if saved:
                 validate_source(saved[0], info, saved[1], identity)
+            progress(100)
             return info, identity
 
         def loaded(result):
@@ -512,7 +560,7 @@ class MainWindow(QMainWindow):
             self.dirty = False
             self.statusBar().showMessage("影片已載入")
 
-        self.launch_job(load, loaded, "建立影格索引…")
+        self.launch_job(load, loaded, title)
 
     def restore_settings(self, analysis, export):
         self._analysis_settings = deepcopy(analysis)
