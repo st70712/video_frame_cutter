@@ -1,3 +1,6 @@
+import base64
+import json
+import ssl
 from email.message import Message
 from threading import Event
 from urllib.error import HTTPError
@@ -11,6 +14,7 @@ from video_frame_cutter.eeclass import (
     EeclassMediaRequest,
     EeclassRedirectHandler,
     download_eeclass_mp4,
+    extract_eeclass_mp4_source,
     is_eeclass_mp4_request,
     redacted_url,
     validate_eeclass_page_url,
@@ -78,6 +82,13 @@ def media_request(**changes):
     return EeclassMediaRequest(**values)
 
 
+def media_html(sources):
+    payload = base64.b64encode(
+        json.dumps({"src": sources}, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    return f"media = JSON.parse(atob('{payload}'));"
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -121,6 +132,67 @@ def test_media_request_requires_first_party_https_mp4_media():
     )
 
 
+def test_extract_media_source_selects_highest_resolution_stably():
+    page = "https://school.ouk.edu.tw/media/doc/252890"
+    first_unknown = "https://school.ouk.edu.tw/video/unknown.mp4"
+    first_hd = "https://school.ouk.edu.tw/video/first-hd.mp4?token=secret"
+    sources = [
+        {"title": "未知畫質", "src": first_unknown},
+        {
+            "title": "高畫質",
+            "src": first_hd,
+            "size": {"width": "1280", "height": "720"},
+        },
+        {
+            "title": "同解析度",
+            "src": "https://school.ouk.edu.tw/video/second-hd.mp4",
+            "size": {"width": 1280, "height": 720},
+        },
+        {
+            "title": "低畫質",
+            "src": "https://school.ouk.edu.tw/video/sd.mp4",
+            "size": {"width": "640", "height": "360"},
+        },
+    ]
+
+    assert extract_eeclass_mp4_source(media_html(sources), page) == first_hd
+    assert (
+        extract_eeclass_mp4_source(media_html(sources[:1]), page) == first_unknown
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"src": "http://school.ouk.edu.tw/video/lecture.mp4"},
+        {"src": "https://other.ouk.edu.tw/video/lecture.mp4"},
+        {"src": "https://user@school.ouk.edu.tw/video/lecture.mp4"},
+        {"src": "https://school.ouk.edu.tw/video/lecture.m3u8"},
+        {"src": 123},
+        "invalid",
+    ],
+)
+def test_extract_media_source_rejects_untrusted_sources(source):
+    page = "https://school.ouk.edu.tw/media/doc/252890"
+
+    assert extract_eeclass_mp4_source(media_html([source]), page) is None
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        "<html></html>",
+        "media = JSON.parse(atob('not+valid'))",
+        "media = JSON.parse(atob('bm90LWpzb24='))",
+        media_html([]),
+    ],
+)
+def test_extract_media_source_ignores_missing_or_malformed_payload(html):
+    page = "https://school.ouk.edu.tw/media/doc/252890"
+
+    assert extract_eeclass_mp4_source(html, page) is None
+
+
 def test_redacted_url_removes_credentials_query_and_fragment():
     value = "https://user:password@school.ouk.edu.tw/video.mp4?token=secret#part"
 
@@ -159,6 +231,37 @@ def test_download_request_drops_authorization_for_different_host():
     request = eeclass_module._download_request(media)
 
     assert request.get_header("Authorization") is None
+
+
+def test_download_opener_uses_native_certificate_store(monkeypatch):
+    native_context = object()
+    https_handler = object()
+    opener = object()
+    protocols = []
+    contexts = []
+    handlers = []
+
+    def fake_ssl_context(protocol):
+        protocols.append(protocol)
+        return native_context
+
+    def fake_https_handler(*, context):
+        contexts.append(context)
+        return https_handler
+
+    def fake_build_opener(*values):
+        handlers.extend(values)
+        return opener
+
+    monkeypatch.setattr(eeclass_module.truststore, "SSLContext", fake_ssl_context)
+    monkeypatch.setattr(eeclass_module, "HTTPSHandler", fake_https_handler)
+    monkeypatch.setattr(eeclass_module, "build_opener", fake_build_opener)
+
+    assert eeclass_module._download_opener() is opener
+    assert protocols == [ssl.PROTOCOL_TLS_CLIENT]
+    assert contexts == [native_context]
+    assert isinstance(handlers[0], EeclassRedirectHandler)
+    assert handlers[1] is https_handler
 
 
 def test_redirect_handler_only_allows_same_https_host():
@@ -259,3 +362,17 @@ def test_download_error_does_not_expose_signed_query(tmp_path, monkeypatch):
     assert "token" not in str(captured.value)
     assert "secret" not in str(captured.value)
     assert "HTTP 403" in str(captured.value)
+
+
+def test_download_reports_certificate_verification_failure(tmp_path, monkeypatch):
+    reason = ssl.SSLCertVerificationError(
+        1, "certificate verify failed: Missing Subject Key Identifier"
+    )
+    monkeypatch.setattr(
+        eeclass_module,
+        "build_opener",
+        lambda *args: FakeOpener(error=eeclass_module.URLError(reason)),
+    )
+
+    with pytest.raises(EeclassDownloadError, match="TLS 憑證驗證失敗"):
+        download_eeclass_mp4(media_request(), tmp_path / "lecture.mp4")

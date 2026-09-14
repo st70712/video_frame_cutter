@@ -25,6 +25,7 @@ from ..eeclass import (
     FORWARDED_HEADERS,
     EeclassCookie,
     EeclassMediaRequest,
+    extract_eeclass_mp4_source,
     is_eeclass_mp4_request,
     redacted_url,
     validate_eeclass_page_url,
@@ -122,6 +123,8 @@ class EeclassDownloadDialog(QDialog):
         self.setMinimumSize(760, 560)
         self.media = None
         self.destination = None
+        self._probe_token = 0
+        self._closing = False
 
         self.profile = profile
         self.cookie_bridge = EeclassCookieBridge(self.profile.cookieStore(), self)
@@ -159,7 +162,7 @@ class EeclassDownloadDialog(QDialog):
         layout.addWidget(self.status)
         layout.addWidget(buttons)
 
-        self.browser.loadStarted.connect(lambda: self.status.setText("正在載入頁面…"))
+        self.browser.loadStarted.connect(self._load_started)
         self.browser.loadFinished.connect(self._load_finished)
 
     def open_page(self):
@@ -168,28 +171,89 @@ class EeclassDownloadDialog(QDialog):
         except ValueError as error:
             self.status.setText(str(error))
             return
+        self._probe_token += 1
         self.media = None
         self.destination = None
         self.download_button.setEnabled(False)
         self.url.setText(page_url)
         self.browser.load(QUrl(page_url))
 
+    def _load_started(self):
+        self._probe_token += 1
+        self.status.setText("正在載入頁面…")
+
     def _load_finished(self, succeeded):
-        if self.media is not None:
+        if self.media is not None or self._closing:
             return
-        self.status.setText("頁面已載入" if succeeded else "頁面載入失敗")
+        if not succeeded:
+            self.status.setText("頁面載入失敗")
+            return
+        try:
+            page_url = validate_eeclass_page_url(self.page.url().toString())
+        except ValueError:
+            self.status.setText("請在頁面完成登入後開啟 EE-Class 影片頁面")
+            return
+        token = self._probe_token
+        self.status.setText("頁面已載入，正在尋找影片…")
+        self.page.toHtml(
+            lambda html, page_url=page_url, token=token: self._html_ready(
+                html, page_url, token
+            )
+        )
+
+    def _html_ready(self, html, page_url, token):
+        if self._closing or token != self._probe_token or self.media is not None:
+            return
+        try:
+            current_page_url = validate_eeclass_page_url(self.page.url().toString())
+        except ValueError:
+            return
+        if current_page_url != page_url:
+            return
+        media_url = extract_eeclass_mp4_source(html, page_url)
+        if media_url is None:
+            self.status.setText("頁面已載入，但找不到可下載的直接 MP4 影片")
+            return
+        self._accept_media(
+            media_url,
+            page_url,
+            (
+                ("User-Agent", self.profile.httpUserAgent()),
+                ("Referer", page_url),
+            ),
+        )
 
     def _media_found(self, media_url, page_url, headers):
-        if self.media is not None:
+        if not self._accept_media(media_url, page_url, headers):
             return
+        self.browser.stop()
+
+    def _accept_media(self, media_url, page_url, headers):
+        if self.media is not None or self._closing:
+            return False
+        try:
+            page_url = validate_eeclass_page_url(page_url)
+        except ValueError:
+            return False
+        current_url = self.page.url().toString()
+        if current_url:
+            try:
+                current_url = validate_eeclass_page_url(current_url)
+            except ValueError:
+                return False
+            if current_url != page_url:
+                return False
+        if not is_eeclass_mp4_request(media_url, page_url, True):
+            return False
         self.media = EeclassMediaRequest(
             media_url, page_url, tuple(headers), self.cookie_bridge.snapshot()
         )
-        self.browser.stop()
         self.status.setText(f"已找到影片：{redacted_url(media_url)}")
         self.download_button.setEnabled(True)
+        return True
 
     def clear_login(self):
+        self._probe_token += 1
         self.cookie_bridge.clear()
         self.profile.clearHttpCache()
         self.media = None
@@ -219,5 +283,7 @@ class EeclassDownloadDialog(QDialog):
         return self.media, self.destination
 
     def done(self, result):
+        self._closing = True
+        self._probe_token += 1
         self.profile.setUrlRequestInterceptor(None)
         super().done(result)

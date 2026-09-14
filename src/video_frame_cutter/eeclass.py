@@ -1,12 +1,18 @@
+import base64
+import binascii
+import json
 import os
 import re
+import ssl
 from dataclasses import dataclass
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import SplitResult, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 from uuid import uuid4
+
+import truststore
 
 from .video import check_cancel
 
@@ -21,6 +27,10 @@ FORWARDED_HEADERS = {
     "user-agent",
 }
 MP4_CONTENT_TYPES = {"application/mp4", "application/octet-stream", "video/mp4"}
+MEDIA_PAYLOAD = re.compile(
+    r"""\bmedia\s*=\s*JSON\.parse\(\s*atob\(\s*(?P<quote>["'])"""
+    r"(?P<payload>[A-Za-z0-9+/]+={0,2})(?P=quote)\s*\)\s*\)"""
+)
 
 
 class EeclassDownloadError(RuntimeError):
@@ -76,6 +86,42 @@ def is_eeclass_mp4_request(url, page_url, is_media_resource):
         and media.hostname == page.hostname
         and PurePosixPath(media.path).suffix.lower() == ".mp4"
     )
+
+
+def extract_eeclass_mp4_source(html, page_url):
+    match = MEDIA_PAYLOAD.search(html)
+    if match is None:
+        return None
+    try:
+        media = json.loads(
+            base64.b64decode(match.group("payload"), validate=True).decode("utf-8")
+        )
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(media, dict) or not isinstance(media.get("src"), list):
+        return None
+
+    selected_url = None
+    selected_pixels = -1
+    for source in media["src"]:
+        if not isinstance(source, dict):
+            continue
+        media_url = source.get("src")
+        if not isinstance(media_url, str) or not is_eeclass_mp4_request(
+            media_url, page_url, True
+        ):
+            continue
+        size = source.get("size")
+        try:
+            width = int(size.get("width")) if isinstance(size, dict) else 0
+            height = int(size.get("height")) if isinstance(size, dict) else 0
+        except (TypeError, ValueError):
+            width = height = 0
+        pixels = width * height if width > 0 and height > 0 else 0
+        if pixels > selected_pixels:
+            selected_url = media_url
+            selected_pixels = pixels
+    return selected_url
 
 
 def redacted_url(value):
@@ -147,6 +193,11 @@ class EeclassRedirectHandler(HTTPRedirectHandler):
         )
 
 
+def _download_opener():
+    context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    return build_opener(EeclassRedirectHandler(), HTTPSHandler(context=context))
+
+
 def _validated_length(headers):
     value = headers.get("Content-Length")
     if value is None:
@@ -195,7 +246,7 @@ def download_eeclass_mp4(
 
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.part")
     request = _download_request(media)
-    opener = build_opener(EeclassRedirectHandler())
+    opener = _download_opener()
     downloaded = 0
     progress(0)
     try:
@@ -233,7 +284,12 @@ def download_eeclass_mp4(
         progress(100)
         return destination
     except (HTTPError, URLError, TimeoutError) as error:
-        detail = f"HTTP {error.code}" if isinstance(error, HTTPError) else "網路連線失敗"
+        if isinstance(error, HTTPError):
+            detail = f"HTTP {error.code}"
+        elif isinstance(getattr(error, "reason", None), ssl.SSLCertVerificationError):
+            detail = "TLS 憑證驗證失敗"
+        else:
+            detail = "網路連線失敗"
         raise EeclassDownloadError(
             f"無法下載影片（{redacted_url(media.url)}）：{detail}。"
         ) from None
