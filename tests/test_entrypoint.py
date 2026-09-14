@@ -12,6 +12,12 @@ def test_parse_arguments_accepts_video_and_smoke_mode():
     assert arguments.video == "sample.mp4"
 
 
+def test_parse_arguments_accepts_webengine_smoke_mode():
+    arguments = parse_arguments(["--webengine-smoke-test"])
+
+    assert arguments.webengine_smoke_test
+
+
 def test_smoke_mode_starts_and_stops_qt_application():
     environment = os.environ.copy()
     result = subprocess.run(

@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -18,6 +19,7 @@ def test_marker_panel_fills_sidebar_and_actions_share_toolbar(qtbot):
     assert window.toolBarArea(window.toolbar) == Qt.ToolBarArea.TopToolBarArea
     assert [action.text() for action in window.toolbar.actions()] == [
         "開啟影片",
+        "從 EE-Class 下載",
         "開啟專案",
         "儲存專案",
         "",
@@ -34,6 +36,63 @@ def test_marker_panel_fills_sidebar_and_actions_share_toolbar(qtbot):
     window.resize(window.minimumSize())
     qtbot.wait(1)
     assert window.marker_list.height() >= window.marker_list.minimumHeight()
+
+
+def test_eeclass_download_loads_video_in_one_background_job(
+    qtbot, video_path, tmp_path, monkeypatch
+):
+    destination = tmp_path / "downloaded.mp4"
+    media = object()
+
+    class FakeDialog:
+        def __init__(self, profile, parent):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selection(self):
+            return media, destination
+
+        def deleteLater(self):
+            pass
+
+    def fake_download(request, output, cancel, progress):
+        assert request is media
+        progress(50)
+        shutil.copyfile(video_path, output)
+        progress(100)
+        return Path(output)
+
+    monkeypatch.setattr(main_window_module, "EeclassDownloadDialog", FakeDialog)
+    monkeypatch.setattr(main_window_module, "create_eeclass_profile", lambda parent: object())
+    monkeypatch.setattr(main_window_module, "download_eeclass_mp4", fake_download)
+    window = MainWindow()
+    window.confirm_discard = lambda: True
+    qtbot.addWidget(window)
+
+    window.choose_eeclass_video()
+    qtbot.waitUntil(lambda: window.info is not None and not window.jobs, timeout=15000)
+
+    assert window.info.path == destination
+    assert window.progress.value() == 100
+    assert window.statusBar().currentMessage() == "影片已載入"
+    window.dirty = False
+    window.close()
+
+
+def test_eeclass_download_respects_discard_cancellation(qtbot, monkeypatch):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.confirm_discard = lambda: False
+    created = []
+    monkeypatch.setattr(
+        main_window_module, "create_eeclass_profile", lambda parent: created.append(parent)
+    )
+
+    window.choose_eeclass_video()
+
+    assert not created
 
 
 def test_marker_workflow(qtbot, video_path, monkeypatch):

@@ -13,6 +13,11 @@ EXECUTABLE_NAME = "VideoFrameCutter"
 ICON_PATH = PROJECT_ROOT / "src" / "video_frame_cutter" / "resources" / "app-icon.png"
 
 av_datas, av_binaries, av_hidden_imports = collect_all("av")
+webengine_hidden_imports = [
+    "PySide6.QtNetwork",
+    "PySide6.QtWebEngineCore",
+    "PySide6.QtWebEngineWidgets",
+]
 datas = copy_metadata("video-frame-cutter") + av_datas + [
     (str(ICON_PATH), "video_frame_cutter/resources"),
 ]
@@ -68,7 +73,7 @@ analysis = Analysis(
     pathex=[str(PROJECT_ROOT / "src")],
     binaries=av_binaries,
     datas=datas,
-    hiddenimports=av_hidden_imports,
+    hiddenimports=av_hidden_imports + webengine_hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
