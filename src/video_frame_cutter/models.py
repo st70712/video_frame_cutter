@@ -64,6 +64,8 @@ class AnalysisSettings:
     min_interval: float = 0.5
     width: int = 480
     duplicate_window_seconds: float = 0.0
+    start_seconds: float = 0.0
+    end_seconds: float | None = None
 
     def validate(self):
         if not (0.001 <= self.threshold <= 1 and 0 <= self.area <= 1):
@@ -76,6 +78,23 @@ class AnalysisSettings:
             raise ValueError("Invalid detection timing")
         if not 64 <= self.width <= 1920:
             raise ValueError("Invalid analysis resolution")
+        if (
+            not isfinite(self.start_seconds)
+            or self.start_seconds < 0
+            or (
+                self.end_seconds is not None
+                and (
+                    not isfinite(self.end_seconds)
+                    or self.end_seconds <= self.start_seconds
+                )
+            )
+        ):
+            raise ValueError("Invalid analysis time range")
+
+    def includes(self, seconds):
+        return self.start_seconds <= seconds and (
+            self.end_seconds is None or seconds <= self.end_seconds
+        )
 
 
 @dataclass

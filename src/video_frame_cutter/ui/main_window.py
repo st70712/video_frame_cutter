@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..analysis import analyze, merge_markers
+from ..analysis import analyze, merge_curves, merge_markers
 from ..eeclass import download_eeclass_mp4
 from ..export import export_markers
 from ..models import AnalysisSettings, ExportSettings, Marker, timecode
@@ -889,10 +889,22 @@ class MainWindow(QMainWindow):
         uid = marker.uid
 
         def edit(image):
-            dialog = CropDialog(image, marker.crop, self.export_settings(), len(selected), self)
+            dialog = CropDialog(
+                image,
+                marker.crop,
+                self.export_settings(),
+                len(selected),
+                len(self.markers),
+                self,
+            )
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
-            targets = selected if dialog.batch.isChecked() else {uid}
+            if dialog.apply_all.isChecked():
+                targets = {item.uid for item in self.markers}
+            elif dialog.apply_selected.isChecked():
+                targets = selected
+            else:
+                targets = {uid}
             markers = deepcopy(self.markers)
             for edited in markers:
                 if edited.uid in targets:
@@ -905,7 +917,7 @@ class MainWindow(QMainWindow):
     def start_analysis(self):
         if not self.info or self.busy_job:
             return
-        dialog = AnalysisSettingsDialog(self.analysis_settings(), self)
+        dialog = AnalysisSettingsDialog(self.analysis_settings(), self.info.duration, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         settings = dialog.settings()
@@ -922,8 +934,10 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-            self.timeline.curve = result.curve
-            self.commit(merge_markers(self.markers, result.markers), "套用分析結果")
+            self.timeline.curve = merge_curves(self.timeline.curve, result.curve, settings)
+            self.commit(
+                merge_markers(self.markers, result.markers, settings), "套用分析結果"
+            )
             self.statusBar().showMessage("已套用分析結果")
 
         self.launch_job(

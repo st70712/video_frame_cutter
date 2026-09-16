@@ -8,6 +8,7 @@ from video_frame_cutter.analysis import (
     changed_fraction,
     channel_difference,
     difference,
+    merge_curves,
     merge_markers,
 )
 from video_frame_cutter.models import AnalysisSettings, FrameRef, Marker
@@ -139,6 +140,26 @@ def test_recent_duplicate_window_must_be_within_range(window):
         StableDetector(AnalysisSettings(duplicate_window_seconds=window))
 
 
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(-0.1, None), (float("nan"), None), (0.5, 0.5), (1.0, 0.5), (0.0, float("inf"))],
+)
+def test_analysis_time_range_must_be_finite_and_nonempty(start, end):
+    with pytest.raises(ValueError, match="Invalid analysis time range"):
+        AnalysisSettings(start_seconds=start, end_seconds=end).validate()
+
+
+def test_analysis_time_range_includes_both_boundaries():
+    settings = AnalysisSettings(start_seconds=1.0, end_seconds=2.0)
+    settings.validate()
+
+    assert not settings.includes(0.999)
+    assert settings.includes(1.0)
+    assert settings.includes(2.0)
+    assert not settings.includes(2.001)
+    assert AnalysisSettings(start_seconds=1.0).includes(100.0)
+
+
 def test_cursor_and_slow_transition():
     dark = np.full((48, 80, 3), 30, dtype=np.uint8)
     pages = []
@@ -161,6 +182,41 @@ def test_unstable_eof_and_merge():
     edited = deepcopy(result.markers[0])
     edited.modified = True
     assert merge_markers([manual, edited], result.markers) == [manual, edited]
+
+
+def test_scoped_merge_preserves_markers_outside_range_and_user_edits():
+    def marker(index, seconds, **values):
+        return Marker(FrameRef(index, 1, 10, index, seconds), **values)
+
+    before = marker(0, 0.5, source="automatic")
+    manual = marker(1, 1.0)
+    modified = marker(2, 1.5, source="automatic", modified=True)
+    replaced = marker(3, 1.75, source="automatic")
+    boundary = marker(4, 2.0, source="automatic")
+    after = marker(5, 2.5, source="automatic")
+    candidate = marker(6, 1.75, source="automatic")
+    settings = AnalysisSettings(start_seconds=1.0, end_seconds=2.0)
+
+    merged = merge_markers(
+        [before, manual, modified, replaced, boundary, after],
+        [marker(1, 1.0, source="automatic"), candidate],
+        settings,
+    )
+
+    assert merged == [before, manual, modified, candidate, after]
+
+
+def test_scoped_curve_merge_replaces_inclusive_range():
+    existing = [(0.5, 0.1), (1.0, 0.2), (1.5, 0.3), (2.0, 0.4), (2.5, 0.5)]
+    candidates = [(1.0, 0.9), (2.0, 0.8)]
+    settings = AnalysisSettings(start_seconds=1.0, end_seconds=2.0)
+
+    assert merge_curves(existing, candidates, settings) == [
+        (0.5, 0.1),
+        (1.0, 0.9),
+        (2.0, 0.8),
+        (2.5, 0.5),
+    ]
 
 
 def test_dynamic_timeout_before_eof_and_stable_recovery():

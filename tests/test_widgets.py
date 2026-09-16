@@ -1,5 +1,6 @@
 from PIL import Image
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialogButtonBox
 
 from video_frame_cutter.models import AnalysisSettings, CropRect, ExportSettings
 from video_frame_cutter.ui.widgets import (
@@ -12,14 +13,39 @@ from video_frame_cutter.workers import Job
 
 
 def test_analysis_settings_dialog_roundtrip(qtbot):
-    original = AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0)
-    dialog = AnalysisSettingsDialog(original)
+    original = AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0, 65, 125)
+    dialog = AnalysisSettingsDialog(original, 180)
     qtbot.addWidget(dialog)
 
     assert dialog.settings() == original
+    assert dialog.start.text() == "00:01:05"
+    assert dialog.end.text() == "00:02:05"
     dialog.threshold.setValue(0.25)
     dialog.reject()
-    assert original == AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0)
+    assert original == AnalysisSettings(0.125, 0.034, 0.65, 1.2, 640, 3.0, 65, 125)
+
+
+def test_analysis_time_point_accepts_hh_mm_ss_beyond_24_hours(qtbot):
+    dialog = AnalysisSettingsDialog(AnalysisSettings(), 30 * 3600)
+    qtbot.addWidget(dialog)
+
+    dialog.start.lineEdit().setText("25:01:02")
+    dialog.start.interpretText()
+
+    assert dialog.start.value() == 25 * 3600 + 62
+    assert dialog.start.text() == "25:01:02"
+
+
+def test_analysis_settings_dialog_validates_video_range(qtbot):
+    dialog = AnalysisSettingsDialog(AnalysisSettings(start_seconds=10.0), 3.0)
+    qtbot.addWidget(dialog)
+    start_button = dialog.buttons.button(QDialogButtonBox.StandardButton.Ok)
+
+    assert dialog.start.value() < dialog.end.value()
+    assert dialog.settings().end_seconds is None
+    assert start_button.isEnabled()
+    dialog.start.setValue(dialog.end.value())
+    assert not start_button.isEnabled()
 
 
 def test_export_settings_dialog_options(qtbot):
@@ -43,12 +69,20 @@ def test_export_settings_dialog_options(qtbot):
 
 
 def test_crop_dialog(qtbot):
-    dialog = CropDialog(Image.new("RGB", (320, 180), "red"), CropRect(), ExportSettings(), 3)
+    dialog = CropDialog(
+        Image.new("RGB", (320, 180), "red"), CropRect(), ExportSettings(), 3, 5
+    )
     qtbot.addWidget(dialog)
     dialog.show()
     dialog.fields[0].setValue(25)
     assert dialog.canvas.crop.left == 0.25
-    assert dialog.batch.isEnabled()
+    assert dialog.apply_current.isChecked()
+    assert dialog.apply_selected.isEnabled()
+    assert dialog.apply_all.isEnabled()
+    dialog.apply_all.setChecked(True)
+    assert dialog.apply_all.isChecked()
+    assert not dialog.apply_current.isChecked()
+    assert not dialog.apply_selected.isChecked()
     assert not dialog.preview.pixmap().isNull()
     dialog.reject()
 
