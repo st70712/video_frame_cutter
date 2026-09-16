@@ -1,3 +1,4 @@
+from bisect import bisect_left, bisect_right
 from collections import deque
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -306,6 +307,21 @@ def settle_pixels(pixels_ready, future):
         pass
 
 
+def analysis_frame_range(info, settings):
+    settings.validate()
+    if not info.frames:
+        raise ValueError("Video contains no indexed frames")
+    first_index = bisect_left(info.times, settings.start_seconds)
+    stop_index = (
+        len(info.frames)
+        if settings.end_seconds is None
+        else bisect_right(info.times, settings.end_seconds)
+    )
+    if first_index >= stop_index:
+        raise ValueError("Analysis time range contains no video frames")
+    return first_index, stop_index
+
+
 def iter_prepared_frames(
     info, settings, cancel=None, *, workers=DEFAULT_WORKERS, buffer_size=DEFAULT_BUFFER_SIZE,
     decoder_threads=DEFAULT_DECODER_THREADS,
@@ -319,11 +335,10 @@ def iter_prepared_frames(
     ``buffer_size`` frames are in flight, and each un-started task also keeps the previous
     decoded frame alive.
     """
-    settings.validate()
     if workers < 1 or buffer_size < workers or decoder_threads < 0:
         raise ValueError("Invalid analysis pipeline configuration")
-    if not info.frames:
-        raise ValueError("Video contains no indexed frames")
+    first_index, stop_index = analysis_frame_range(info, settings)
+    expected_count = stop_index - first_index
     check_cancel(cancel)
     with av.open(str(info.path)) as container:
         stream = container.streams[info.stream_index]
@@ -338,6 +353,10 @@ def iter_prepared_frames(
                 check_cancel(cancel)
                 if index >= len(info.frames) or frame.pts != info.frames[index].pts:
                     raise ValueError("Video changed since indexing")
+                if index >= stop_index:
+                    break
+                if index < first_index:
+                    continue
                 count += 1
                 pixels_ready = Future()
                 future = executor.submit(
@@ -350,7 +369,7 @@ def iter_prepared_frames(
                 if len(pending) >= buffer_size:
                     yield pending.popleft().result()
                     check_cancel(cancel)
-            if count != len(info.frames):
+            if count != expected_count:
                 raise ValueError("Video ended before all indexed frames were decoded")
             previous_frame = previous_pixels = None
             while pending:
@@ -372,6 +391,8 @@ def analyze(
     buffer_size=DEFAULT_BUFFER_SIZE, decoder_threads=DEFAULT_DECODER_THREADS,
 ):
     detector = StableDetector(settings)
+    first_index, stop_index = analysis_frame_range(info, settings)
+    total_frames = stop_index - first_index
     last_percent = -1
     frames = iter_prepared_frames(
         info, settings, cancel, workers=workers, buffer_size=buffer_size,
@@ -381,7 +402,7 @@ def analyze(
         for count, item in enumerate(frames, 1):
             check_cancel(cancel)
             detector.feed(item.reference, item.pixels, item.difference)
-            percent = min(99, int(count / len(info.frames) * 100))
+            percent = min(99, int(count / total_frames * 100))
             if percent != last_percent:
                 progress(percent)
                 last_percent = percent
@@ -402,10 +423,23 @@ def analysis_defaults():
     }
 
 
-def merge_markers(existing, candidates):
-    kept = [marker for marker in existing if marker.source == "manual" or marker.modified]
+def merge_markers(existing, candidates, settings=None):
+    kept = [
+        marker
+        for marker in existing
+        if marker.source == "manual"
+        or marker.modified
+        or (settings is not None and not settings.includes(marker.frame.seconds))
+    ]
     occupied = {marker.frame.pts for marker in kept}
     return sorted(
         kept + [marker for marker in candidates if marker.frame.pts not in occupied],
         key=lambda marker: marker.frame.seconds,
+    )
+
+
+def merge_curves(existing, candidates, settings):
+    return sorted(
+        [point for point in existing if not settings.includes(point[0])] + list(candidates),
+        key=lambda point: point[0],
     )

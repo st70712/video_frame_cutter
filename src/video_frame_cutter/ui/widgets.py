@@ -1,8 +1,11 @@
+from math import ceil
+
 from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QValidator
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -12,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -312,9 +316,10 @@ class CropCanvas(ImageView):
 
 
 class AnalysisSettingsDialog(QDialog):
-    def __init__(self, settings, parent=None):
+    def __init__(self, settings, duration, parent=None):
         super().__init__(parent)
         self.setWindowTitle("分析畫面變化")
+        self.duration = duration
         self.threshold = self._decimal(0.001, 1, settings.threshold, 0.01)
         self.area = self._decimal(0, 100, settings.area * 100, 0.1)
         self.stable = self._decimal(0.05, 10, settings.stable_seconds, 0.05)
@@ -331,6 +336,14 @@ class AnalysisSettingsDialog(QDialog):
         for width in widths:
             self.width.addItem(str(width), width)
         self.width.setCurrentIndex(self.width.findData(settings.width))
+        maximum_seconds = max(1, ceil(duration))
+        end_seconds = maximum_seconds if settings.end_seconds is None else min(
+            maximum_seconds, ceil(settings.end_seconds)
+        )
+        end_seconds = max(1, end_seconds)
+        start_seconds = min(int(settings.start_seconds), end_seconds - 1)
+        self.start = TimePointSpinBox(maximum_seconds, start_seconds)
+        self.end = TimePointSpinBox(maximum_seconds, end_seconds)
         form = QFormLayout()
         form.addRow("變化門檻", self.threshold)
         form.addRow("最小變化面積 (%)", self.area)
@@ -338,16 +351,21 @@ class AnalysisSettingsDialog(QDialog):
         form.addRow("重複畫面忽略時間 (秒)", self.duplicate_window)
         form.addRow("最小間隔 (秒)", self.interval)
         form.addRow("分析寬度 (px)", self.width)
-        buttons = QDialogButtonBox(
+        form.addRow("起始時間 (hh:mm:ss)", self.start)
+        form.addRow("結束時間 (hh:mm:ss)", self.end)
+        self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("開始分析")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("開始分析")
+        self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
         layout = QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(buttons)
+        layout.addWidget(self.buttons)
+        self.start.valueChanged.connect(self._update_time_range)
+        self.end.valueChanged.connect(self._update_time_range)
+        self._update_time_range()
 
     def _decimal(self, minimum, maximum, value, step):
         control = QDoubleSpinBox()
@@ -358,6 +376,9 @@ class AnalysisSettingsDialog(QDialog):
         return control
 
     def settings(self):
+        end_seconds = (
+            None if self.end.value() == self.end.maximum() else self.end.value()
+        )
         return AnalysisSettings(
             threshold=self.threshold.value(),
             area=self.area.value() / 100,
@@ -365,7 +386,53 @@ class AnalysisSettingsDialog(QDialog):
             min_interval=self.interval.value(),
             width=self.width.currentData(),
             duplicate_window_seconds=self.duplicate_window.value(),
+            start_seconds=self.start.value(),
+            end_seconds=end_seconds,
         )
+
+    def _update_time_range(self):
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
+            self.start.value() < self.end.value()
+        )
+
+
+class TimePointSpinBox(QSpinBox):
+    def __init__(self, maximum_seconds, value=0, parent=None):
+        super().__init__(parent)
+        self.setRange(0, maximum_seconds)
+        self.setSingleStep(1)
+        self.setAccelerated(True)
+        self.setValue(value)
+
+    def textFromValue(self, value):
+        hours, remainder = divmod(value, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02}:{minutes:02}:{seconds:02}"
+
+    def valueFromText(self, text):
+        try:
+            hours, minutes, seconds = (int(section) for section in text.split(":"))
+        except (TypeError, ValueError):
+            return self.value()
+        return hours * 3600 + minutes * 60 + seconds
+
+    def validate(self, text, position):
+        sections = text.split(":")
+        if len(sections) > 3 or any(
+            section and not section.isdigit() for section in sections
+        ):
+            state = QValidator.State.Invalid
+        elif len(sections) < 3 or any(not section for section in sections):
+            state = QValidator.State.Intermediate
+        else:
+            hours, minutes, seconds = (int(section) for section in sections)
+            value = hours * 3600 + minutes * 60 + seconds
+            state = (
+                QValidator.State.Acceptable
+                if minutes < 60 and seconds < 60 and self.minimum() <= value <= self.maximum()
+                else QValidator.State.Invalid
+            )
+        return state, text, position
 
 
 class ExportSettingsDialog(QDialog):
@@ -431,7 +498,7 @@ class ExportSettingsDialog(QDialog):
 
 
 class CropDialog(QDialog):
-    def __init__(self, image, crop, output, selected_count, parent=None):
+    def __init__(self, image, crop, output, selected_count, total_count, parent=None):
         super().__init__(parent)
         self.setWindowTitle("編輯截圖範圍")
         self.resize(1000, 640)
@@ -452,13 +519,23 @@ class CropDialog(QDialog):
             self.fields.append(control)
         reset = QPushButton("重設全圖")
         reset.clicked.connect(lambda: self.set_crop(CropRect()))
-        self.batch = QCheckBox(f"套用至選取的 {selected_count} 個標記")
-        self.batch.setEnabled(selected_count > 1)
+        self.apply_group = QButtonGroup(self)
+        self.apply_current = QRadioButton("僅套用至目前標記")
+        self.apply_selected = QRadioButton(f"套用至選取的 {selected_count} 個標記")
+        self.apply_all = QRadioButton(f"套用至全部 {total_count} 個標記")
+        for option in (self.apply_current, self.apply_selected, self.apply_all):
+            self.apply_group.addButton(option)
+        self.apply_current.setChecked(True)
+        self.apply_selected.setEnabled(selected_count > 1)
+        self.apply_all.setEnabled(total_count > 1)
         side = QVBoxLayout()
         side.addLayout(form)
         side.addWidget(reset)
         side.addWidget(self.preview)
-        side.addWidget(self.batch)
+        side.addWidget(QLabel("套用範圍"))
+        side.addWidget(self.apply_current)
+        side.addWidget(self.apply_selected)
+        side.addWidget(self.apply_all)
         side.addStretch()
         content = QHBoxLayout()
         content.addWidget(self.canvas, 1)

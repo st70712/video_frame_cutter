@@ -1,13 +1,15 @@
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 import video_frame_cutter.ui.main_window as main_window_module
-from video_frame_cutter.models import ExportSettings
+from video_frame_cutter.analysis import AnalysisResult
+from video_frame_cutter.models import CropRect, ExportSettings, Marker
 from video_frame_cutter.ui.main_window import MainWindow
-from video_frame_cutter.ui.widgets import AnalysisSettingsDialog, ExportSettingsDialog
+from video_frame_cutter.ui.widgets import AnalysisSettingsDialog, CropDialog, ExportSettingsDialog
 
 
 def test_marker_panel_fills_sidebar_and_actions_share_toolbar(qtbot):
@@ -164,6 +166,94 @@ def test_analysis_action_preserves_manual_markers_and_undo(qtbot, video_path, mo
     qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
 
 
+def test_scoped_analysis_preserves_results_outside_range(qtbot, video_path, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+
+    def accept_range(dialog):
+        dialog.start.setValue(dialog.parent().info.frames[10].seconds)
+        dialog.end.setValue(dialog.parent().info.frames[20].seconds)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(AnalysisSettingsDialog, "exec", accept_range)
+    window = MainWindow()
+    window.confirm_discard = lambda: True
+    qtbot.addWidget(window)
+    window.show()
+    window.load_video(video_path)
+    qtbot.waitUntil(
+        lambda: window.frame_image is not None and not window.jobs, timeout=15000,
+    )
+    before = Marker(window.info.frames[2], source="automatic")
+    replaced = Marker(window.info.frames[12], source="automatic")
+    after = Marker(window.info.frames[25], source="automatic")
+    candidate = Marker(window.info.frames[15], source="automatic")
+    window.markers = [before, replaced, after]
+    window.refresh_markers()
+    window.timeline.curve = [
+        (before.frame.seconds, 0.1),
+        (replaced.frame.seconds, 0.2),
+        (after.frame.seconds, 0.3),
+    ]
+
+    def fake_analyze(info, settings, cancel, progress):
+        progress(100)
+        assert settings.includes(candidate.frame.seconds)
+        return AnalysisResult([candidate], [(candidate.frame.seconds, 0.9)])
+
+    monkeypatch.setattr(main_window_module, "analyze", fake_analyze)
+    window.start_analysis()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
+
+    assert [marker.uid for marker in window.markers] == [before.uid, candidate.uid, after.uid]
+    assert window.timeline.curve == [
+        (before.frame.seconds, 0.1),
+        (candidate.frame.seconds, 0.9),
+        (after.frame.seconds, 0.3),
+    ]
+    window.dirty = False
+    window.close()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
+
+
+def test_edit_crop_applies_to_all_markers_as_one_undo(qtbot, video_path, monkeypatch):
+    window = MainWindow()
+    window.confirm_discard = lambda: True
+    qtbot.addWidget(window)
+    window.show()
+    window.load_video(video_path)
+    qtbot.waitUntil(
+        lambda: window.frame_image is not None and not window.jobs, timeout=15000,
+    )
+    window.markers = [Marker(window.info.frames[index]) for index in (2, 12, 25)]
+    window.refresh_markers()
+    source_image = window.frame_image
+    window.select_uid(window.markers[0].uid)
+    crop = CropRect(0.1, 0.2, 0.8, 0.9)
+
+    def accept_all(dialog):
+        dialog.set_crop(crop)
+        dialog.apply_all.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(CropDialog, "exec", accept_all)
+    monkeypatch.setattr(
+        window,
+        "seek",
+        lambda seconds, callback=None: callback(source_image) if callback else None,
+    )
+    window.undo_stack.clear()
+
+    window.edit_crop()
+    assert [marker.crop for marker in window.markers] == [crop, crop, crop]
+    assert all(marker.modified for marker in window.markers)
+    assert window.undo_stack.count() == 1
+    window.undo_stack.undo()
+    assert [marker.crop for marker in window.markers] == [CropRect()] * 3
+    window.dirty = False
+    window.close()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
+
+
 def test_parameter_dialog_cancellation_has_no_side_effects(qtbot, monkeypatch):
     monkeypatch.setattr(
         AnalysisSettingsDialog, "exec", lambda self: QDialog.DialogCode.Rejected
@@ -171,7 +261,7 @@ def test_parameter_dialog_cancellation_has_no_side_effects(qtbot, monkeypatch):
     monkeypatch.setattr(ExportSettingsDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
     window = MainWindow()
     qtbot.addWidget(window)
-    window.info = object()
+    window.info = SimpleNamespace(duration=3.0)
     launched = []
     window.launch_job = lambda *args: launched.append(args)
     analysis = window.analysis_settings()
@@ -179,7 +269,6 @@ def test_parameter_dialog_cancellation_has_no_side_effects(qtbot, monkeypatch):
 
     window.start_analysis()
     window.choose_export()
-
     assert not launched
     assert window.analysis_settings() == analysis
     assert window.export_settings() == export

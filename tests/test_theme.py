@@ -75,7 +75,7 @@ def test_palette_text_is_readable(app, scheme):
 
 def test_analysis_dialog_fields_are_readable_in_dark(app, qtbot):
     theme.apply(app, Qt.ColorScheme.Dark)
-    dialog = AnalysisSettingsDialog(AnalysisSettings())
+    dialog = AnalysisSettingsDialog(AnalysisSettings(), 3.0)
     qtbot.addWidget(dialog)
     for control in (dialog.threshold, dialog.width):
         palette = control.palette()

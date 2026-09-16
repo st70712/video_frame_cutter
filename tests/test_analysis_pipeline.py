@@ -129,6 +129,34 @@ def test_pipeline_cancel_and_close_join_workers(video_path):
     assert not any(thread.name.startswith("vfc-analysis") for thread in active_threads())
 
 
+def test_pipeline_uses_inclusive_analysis_time_range(video_path):
+    info = index_video(video_path)
+    settings = AnalysisSettings(
+        width=160,
+        start_seconds=info.frames[3].seconds,
+        end_seconds=info.frames[8].seconds,
+    )
+
+    actual_frames = list(iter_analysis_frames(info, settings, workers=2))
+    assert [reference for reference, _ in actual_frames] == info.frames[3:9]
+    progress = []
+    result = analyze(info, settings, workers=2, progress=progress.append)
+    assert [seconds for seconds, _ in result.curve] == [
+        reference.seconds for reference in info.frames[3:9]
+    ]
+    assert result.curve[0][1] == 0.0
+    assert progress == sorted(set(progress))
+    assert progress[-1] == 100
+
+
+def test_pipeline_rejects_time_range_without_frames(video_path):
+    info = index_video(video_path)
+    start_seconds = (info.frames[-1].seconds + info.duration) / 2
+
+    with pytest.raises(ValueError, match="contains no video frames"):
+        analyze(info, AnalysisSettings(start_seconds=start_seconds))
+
+
 @pytest.mark.parametrize("damage", ["pts", "short", "long"])
 def test_pipeline_rejects_changed_video(video_path, damage):
     info = index_video(video_path)
