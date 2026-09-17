@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ..analysis import analyze, merge_curves, merge_markers
 from ..eeclass import download_eeclass_mp4
 from ..export import export_markers
+from ..magic_crop import detect_crop
 from ..models import AnalysisSettings, ExportSettings, Marker, timecode
 from ..project import fingerprint, read_project, save_project, validate_source
 from ..video import FrameReader, check_cancel, index_video
@@ -905,6 +906,10 @@ class MainWindow(QMainWindow):
                 targets = selected
             else:
                 targets = {uid}
+            plan = dialog.magic_plan()
+            if plan and len(targets) > 1:
+                self.apply_magic_crops(targets, *plan, dialog.canvas.crop, uid)
+                return
             markers = deepcopy(self.markers)
             for edited in markers:
                 if edited.uid in targets:
@@ -913,6 +918,36 @@ class MainWindow(QMainWindow):
             self.commit(markers, "編輯裁切範圍")
 
         self.seek(marker.frame.seconds, edit)
+
+    def apply_magic_crops(self, targets, seed, settings, current, uid):
+        """Detect a crop for every target marker from its own frame, then commit once.
+
+        The dialog has closed by now, so the status bar progress and cancel button are
+        reachable; running this while it was still open would hide them behind the modal.
+        """
+        info = self.info
+        order = [marker for marker in self.markers if marker.uid in targets]
+
+        def detect(cancel, progress):
+            crops = {uid: current}
+            with FrameReader(info, cache_size=1) as reader:
+                for index, marker in enumerate(order, 1):
+                    check_cancel(cancel)
+                    if marker.uid not in crops:
+                        image = reader.get(marker.frame, cancel)
+                        crops[marker.uid] = detect_crop(image, seed, settings).crop
+                    progress(min(99, round(index / len(order) * 100)))
+            return crops
+
+        def ready(crops):
+            markers = deepcopy(self.markers)
+            for edited in markers:
+                if edited.uid in crops:
+                    edited.crop = crops[edited.uid]
+                    edited.modified = True
+            self.commit(markers, "魔術截圖範圍")
+
+        self.launch_job(detect, ready, title="正在偵測文字範圍…")
 
     def start_analysis(self):
         if not self.info or self.busy_job:

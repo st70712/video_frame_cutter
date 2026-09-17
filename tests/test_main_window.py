@@ -254,6 +254,65 @@ def test_edit_crop_applies_to_all_markers_as_one_undo(qtbot, video_path, monkeyp
     qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
 
 
+def test_magic_crop_applies_a_separate_crop_per_marker_as_one_undo(
+    qtbot, video_path, monkeypatch
+):
+    window = MainWindow()
+    window.confirm_discard = lambda: True
+    qtbot.addWidget(window)
+    window.show()
+    window.load_video(video_path)
+    qtbot.waitUntil(
+        lambda: window.frame_image is not None and not window.jobs, timeout=15000,
+    )
+    window.markers = [Marker(window.info.frames[index]) for index in (2, 12, 25)]
+    window.refresh_markers()
+    source_image = window.frame_image
+    window.select_uid(window.markers[0].uid)
+    seed = CropRect(0.1, 0.1, 0.9, 0.9)
+    current = CropRect(0.2, 0.2, 0.7, 0.7)
+    detected = []
+
+    def magic_then_apply_all(dialog):
+        dialog.set_crop(current)
+        dialog.magic_seed = seed
+        dialog.magic_settings = None
+        dialog.apply_all.setChecked(True)
+        return QDialog.DialogCode.Accepted
+
+    def fake_detect(image, crop, settings):
+        # A different rect per decoded frame, so a shared crop would be visible as a tie.
+        detected.append(crop)
+        step = 0.05 * len(detected)
+        return SimpleNamespace(crop=CropRect(step, step, 0.8, 0.8), kind="text", lines=1)
+
+    monkeypatch.setattr(CropDialog, "exec", magic_then_apply_all)
+    monkeypatch.setattr(main_window_module, "detect_crop", fake_detect)
+    monkeypatch.setattr(
+        window,
+        "seek",
+        lambda seconds, callback=None: callback(source_image) if callback else None,
+    )
+    window.undo_stack.clear()
+
+    window.edit_crop()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=15000)
+
+    crops = [marker.crop for marker in window.markers]
+    assert crops[0] == current
+    assert crops[1] == CropRect(0.05, 0.05, 0.8, 0.8)
+    assert crops[2] == CropRect(0.1, 0.1, 0.8, 0.8)
+    assert len(set(crops)) == 3
+    assert detected == [seed, seed]
+    assert all(marker.modified for marker in window.markers)
+    assert window.undo_stack.count() == 1
+    window.undo_stack.undo()
+    assert [marker.crop for marker in window.markers] == [CropRect()] * 3
+    window.dirty = False
+    window.close()
+    qtbot.waitUntil(lambda: not window.jobs, timeout=10000)
+
+
 def test_parameter_dialog_cancellation_has_no_side_effects(qtbot, monkeypatch):
     monkeypatch.setattr(
         AnalysisSettingsDialog, "exec", lambda self: QDialog.DialogCode.Rejected
