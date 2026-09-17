@@ -1,8 +1,10 @@
+import pytest
 from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialogButtonBox
 
 from video_frame_cutter.models import AnalysisSettings, CropRect, ExportSettings
+from video_frame_cutter.ui import widgets
 from video_frame_cutter.ui.widgets import (
     AnalysisSettingsDialog,
     CropDialog,
@@ -84,6 +86,83 @@ def test_crop_dialog(qtbot):
     assert not dialog.apply_current.isChecked()
     assert not dialog.apply_selected.isChecked()
     assert not dialog.preview.pixmap().isNull()
+    dialog.reject()
+
+
+def test_crop_dialog_magic_button_updates_crop_and_fields(qtbot, slide_image):
+    image, box = slide_image
+    dialog = CropDialog(image, CropRect(), ExportSettings(), 1, 5)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+
+    crop = dialog.canvas.crop
+    assert crop != CropRect()
+    assert crop.left * image.width < box[0] and crop.right * image.width > box[2]
+    for field, value in zip(dialog.fields, (crop.left, crop.top, crop.right, crop.bottom)):
+        assert field.value() == pytest.approx(value * 100, abs=0.01)
+    assert not dialog.preview.pixmap().isNull()
+    assert dialog.hint.text()
+    dialog.reject()
+
+
+def test_crop_dialog_magic_button_is_a_no_op_when_pressed_again(qtbot, slide_image):
+    image, _ = slide_image
+    dialog = CropDialog(image, CropRect(), ExportSettings(), 1, 5)
+    qtbot.addWidget(dialog)
+
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+    once = dialog.canvas.crop
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+
+    assert dialog.canvas.crop == once
+    dialog.reject()
+
+
+def test_crop_dialog_magic_plan_is_cleared_by_a_manual_edit(qtbot, slide_image):
+    image, _ = slide_image
+    dialog = CropDialog(image, CropRect(), ExportSettings(), 1, 5)
+    qtbot.addWidget(dialog)
+
+    assert dialog.magic_plan() is None
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+    seed, settings = dialog.magic_plan()
+    assert seed == CropRect()
+    assert settings.aspect == (1920, 1080)
+
+    dialog.fields[0].setValue(5)
+
+    assert dialog.magic_plan() is None
+    dialog.reject()
+
+
+def test_crop_dialog_reports_when_no_text_is_found(qtbot):
+    dialog = CropDialog(Image.new("RGB", (320, 180), "red"), CropRect(), ExportSettings(), 1, 5)
+    qtbot.addWidget(dialog)
+
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+
+    assert dialog.canvas.crop == CropRect()
+    assert dialog.hint.text() == "沒有偵測到可縮小的範圍"
+    dialog.reject()
+
+
+def test_crop_dialog_magic_failure_is_reported_inline(qtbot, monkeypatch, slide_image):
+    image, _ = slide_image
+    dialog = CropDialog(image, CropRect(), ExportSettings(), 1, 5)
+    qtbot.addWidget(dialog)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(widgets, "detect_crop", boom)
+    qtbot.mouseClick(dialog.magic, Qt.MouseButton.LeftButton)
+
+    assert dialog.canvas.crop == CropRect()
+    assert dialog.magic.isEnabled()
+    assert dialog.magic_plan() is None
+    assert "RuntimeError" in dialog.hint.text()
     dialog.reject()
 
 

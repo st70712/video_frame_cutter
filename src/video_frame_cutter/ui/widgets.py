@@ -1,3 +1,5 @@
+import logging
+from dataclasses import replace
 from math import ceil
 
 from PIL import Image
@@ -5,6 +7,7 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QValidator
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -21,8 +24,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..magic_crop import DEFAULT_SETTINGS, detect_crop
 from ..models import AnalysisSettings, CropRect, ExportSettings, timecode
 from . import theme
+
+MAGIC_MESSAGES = {
+    "content": "沒有偵測到文字，改用畫面內容範圍",
+    "unchanged": "沒有偵測到可縮小的範圍",
+}
 
 
 def pixmap(image):
@@ -518,7 +527,24 @@ class CropDialog(QDialog):
             form.addRow(label, control)
             self.fields.append(control)
         reset = QPushButton("重設全圖")
+        reset.setAutoDefault(False)
         reset.clicked.connect(lambda: self.set_crop(CropRect()))
+        self.magic_seed = None
+        self.magic_settings = None
+        self.magic = QPushButton("魔術截圖")
+        self.magic.setAutoDefault(False)
+        self.magic.setShortcut("Ctrl+D")
+        self.magic.setToolTip("在目前範圍內自動縮小到文字邊界 (Ctrl+D)")
+        self.magic.clicked.connect(self.magic_crop)
+        self.magic_padding = QDoubleSpinBox()
+        self.magic_padding.setRange(0, 10)
+        self.magic_padding.setDecimals(2)
+        self.magic_padding.setValue(1)
+        self.magic_aspect = QCheckBox("維持匯出比例")
+        self.magic_aspect.setChecked(True)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        self.hint.setFixedWidth(240)
         self.apply_group = QButtonGroup(self)
         self.apply_current = QRadioButton("僅套用至目前標記")
         self.apply_selected = QRadioButton(f"套用至選取的 {selected_count} 個標記")
@@ -528,9 +554,18 @@ class CropDialog(QDialog):
         self.apply_current.setChecked(True)
         self.apply_selected.setEnabled(selected_count > 1)
         self.apply_all.setEnabled(total_count > 1)
+        actions = QHBoxLayout()
+        actions.addWidget(self.magic)
+        actions.addWidget(reset)
+        padding = QHBoxLayout()
+        padding.addWidget(QLabel("留白 (%)"))
+        padding.addWidget(self.magic_padding)
         side = QVBoxLayout()
         side.addLayout(form)
-        side.addWidget(reset)
+        side.addLayout(actions)
+        side.addLayout(padding)
+        side.addWidget(self.magic_aspect)
+        side.addWidget(self.hint)
         side.addWidget(self.preview)
         side.addWidget(QLabel("套用範圍"))
         side.addWidget(self.apply_current)
@@ -553,7 +588,48 @@ class CropDialog(QDialog):
         self.canvas.changed.connect(self.set_crop)
         self.set_crop(crop)
 
+    def magic_crop(self):
+        """Shrink the crop to the text inside it, reusing the seed of an earlier run.
+
+        Detecting again from an already tightened box keeps eating into the text, so the
+        seed is pinned until the crop is edited by hand; pressing twice is then a no-op.
+        """
+        seed = self.canvas.crop if self.magic_seed is None else self.magic_seed
+        settings = replace(
+            DEFAULT_SETTINGS,
+            padding=self.magic_padding.value() / 100,
+            aspect=(self.output.width, self.output.height)
+            if self.magic_aspect.isChecked()
+            else None,
+        )
+        self.magic.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            result = detect_crop(self.source, seed, settings)
+        except Exception as error:
+            logging.getLogger(__name__).exception("Magic crop failed")
+            self.hint.setText(f"自動偵測失敗：{type(error).__name__}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.magic.setEnabled(True)
+        if result.crop != self.canvas.crop:
+            self.set_crop(result.crop)
+        self.magic_seed = seed
+        self.magic_settings = settings
+        self.hint.setText(
+            MAGIC_MESSAGES.get(result.kind, f"已依文字內容縮小範圍（{result.lines} 行）")
+        )
+
+    def magic_plan(self):
+        """Seed and settings of the last magic crop, or ``None`` once edited by hand."""
+        if self.magic_seed is None:
+            return None
+        return self.magic_seed, self.magic_settings
+
     def set_crop(self, crop):
+        self.magic_seed = None
+        self.magic_settings = None
         self.canvas.crop = crop
         self.canvas.update()
         for field, value in zip(self.fields, (crop.left, crop.top, crop.right, crop.bottom)):
