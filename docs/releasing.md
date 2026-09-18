@@ -36,7 +36,7 @@
 可跨重啟沿用及清除，並以有權限的測試帳號完成 MP4 下載；不得將帳密、Cookie、
 Authorization header 或完整 signed URL 寫入建置日誌與 issue。
 
-兩平台都通過後，publish job 才建立 GitHub Release，內容包含：
+兩平台都通過後，publish job 才建立 draft GitHub Release，逐一上傳並驗證所有產物都成功後才公開，內容包含：
 
 - `Video-Frame-Cutter-vX.Y.Z-windows-x64.zip`
 - `Video-Frame-Cutter-vX.Y.Z-macos-arm64.dmg`
@@ -46,7 +46,9 @@ Authorization header 或完整 signed URL 寫入建置日誌與 issue。
 
 ## 失敗處理
 
-若 workflow 在發布前失敗，修正後可刪除遠端與本機 tag，再於同一提交歷史建立正確 tag。若 GitHub Release 已公開，不應重用同一版本覆蓋產物；請遞增 patch 版本並建立新 tag，以維持 checksum 與下載內容可追溯。
+若建置或上傳只因暫時性 runner、網路或 GitHub 服務問題失敗，直接 rerun failed jobs。publish job 會沿用同 tag 的 draft release，逐一以 `--clobber` 重新上傳產物，並只在全部成功後公開，因此部分上傳不會留下公開的不完整 release。
+
+若失敗原因需要修改程式碼，且 release 尚未公開，可刪除 draft release、遠端與本機 tag，再於修正後的提交建立同版本 tag。若 GitHub Release 已公開，workflow 會拒絕覆寫既有產物；請遞增 patch 版本並建立新 tag，以維持 checksum 與下載內容可追溯。
 
 ## macOS 簽章限制
 
