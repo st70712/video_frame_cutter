@@ -49,6 +49,7 @@ class Marker:
     uid: str = field(default_factory=lambda: str(uuid4()))
     crop: CropRect = field(default_factory=CropRect)
     source: str = "manual"
+    label: str = ""
     modified: bool = False
     included: bool = True
     review: bool = False

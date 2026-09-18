@@ -65,6 +65,18 @@ class EditMarkers(QUndoCommand):
         self.window.set_markers(deepcopy(self.before))
 
 
+def _eeclass_markers(info, indexes):
+    markers = []
+    occupied = set()
+    for item in indexes:
+        frame = info.at(item.milliseconds / 1000)
+        if frame.pts in occupied:
+            continue
+        occupied.add(frame.pts)
+        markers.append(Marker(frame, source="eeclass", label=item.title))
+    return markers
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -481,7 +493,7 @@ class MainWindow(QMainWindow):
             self.eeclass_profile = create_eeclass_profile(self)
         dialog = EeclassDownloadDialog(self.eeclass_profile, self)
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        media, destination = dialog.selection()
+        media, destination, indexes = dialog.selection()
         dialog.deleteLater()
         if not accepted:
             return
@@ -492,6 +504,7 @@ class MainWindow(QMainWindow):
             prepare=lambda cancel, progress: download_eeclass_mp4(
                 media, destination, cancel, progress
             ),
+            eeclass_indexes=indexes,
             title="下載影片並建立影格索引…",
         )
 
@@ -504,6 +517,7 @@ class MainWindow(QMainWindow):
         saved=None,
         project_path=None,
         prepare=None,
+        eeclass_indexes=(),
         title="建立影格索引…",
     ):
         if self.busy_job is not None:
@@ -534,7 +548,11 @@ class MainWindow(QMainWindow):
             self.loading = False
             self.info, self.identity = result
             self.project_path = Path(project_path) if project_path else None
-            self.markers = deepcopy(saved[1]) if saved else []
+            self.markers = (
+                deepcopy(saved[1])
+                if saved
+                else _eeclass_markers(self.info, eeclass_indexes)
+            )
             self.undo_stack.clear()
             self.thumb_cache.clear()
             self.timeline.duration = self.info.duration
@@ -558,7 +576,7 @@ class MainWindow(QMainWindow):
             self.refresh_markers()
             self.seek(self.info.frames[0].seconds)
             self.sync_pan()
-            self.dirty = False
+            self.dirty = bool(eeclass_indexes)
             self.statusBar().showMessage("影片已載入")
 
         self.launch_job(load, loaded, title)
@@ -724,17 +742,30 @@ class MainWindow(QMainWindow):
         self.refreshing = True
         self.marker_list.clear()
         for index, marker in enumerate(self.markers):
-            origin = "手動" if marker.source == "manual" else "自動"
+            origin = {
+                "manual": "手動",
+                "automatic": "自動",
+                "eeclass": "EE-Class",
+            }[marker.source]
             state = "待檢查" if marker.review else origin
+            if marker.source == "eeclass" and marker.label:
+                state = f"{origin}｜{marker.label}"
             item = QListWidgetItem(f"{index + 1:03}  {timecode(marker.frame.seconds)}\n{state}")
             item.setData(Qt.ItemDataRole.UserRole, marker.uid)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked if marker.included else Qt.CheckState.Unchecked
             )
-            item.setToolTip(
-                f"變化時間：{timecode(marker.change_seconds)}\n差異分數：{marker.score:.4f}"
+            details = []
+            if marker.label:
+                details.append(f"標題：{marker.label}")
+            details.extend(
+                (
+                    f"變化時間：{timecode(marker.change_seconds)}",
+                    f"差異分數：{marker.score:.4f}",
+                )
             )
+            item.setToolTip("\n".join(details))
             item.setSizeHint(QSize(250, 62))
             key = (marker.frame.pts, marker.crop)
             if key in self.thumb_cache:

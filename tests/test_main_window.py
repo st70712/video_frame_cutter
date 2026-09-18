@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QDialog, QFileDialog, QMessageBox
 
 import video_frame_cutter.ui.main_window as main_window_module
 from video_frame_cutter.analysis import AnalysisResult
+from video_frame_cutter.eeclass import EeclassIndex
 from video_frame_cutter.models import CropRect, ExportSettings, Marker
 from video_frame_cutter.ui.main_window import MainWindow
 from video_frame_cutter.ui.widgets import AnalysisSettingsDialog, CropDialog, ExportSettingsDialog
@@ -45,6 +46,11 @@ def test_eeclass_download_loads_video_in_one_background_job(
 ):
     destination = tmp_path / "downloaded.mp4"
     media = object()
+    indexes = (
+        EeclassIndex(0, "課程片頭", "1"),
+        EeclassIndex(50, "同影格索引", "2"),
+        EeclassIndex(100, "Slide 1", "3"),
+    )
 
     class FakeDialog:
         def __init__(self, profile, parent):
@@ -54,7 +60,7 @@ def test_eeclass_download_loads_video_in_one_background_job(
             return QDialog.DialogCode.Accepted
 
         def selection(self):
-            return media, destination
+            return media, destination, indexes
 
         def deleteLater(self):
             pass
@@ -77,6 +83,13 @@ def test_eeclass_download_loads_video_in_one_background_job(
     qtbot.waitUntil(lambda: window.info is not None and not window.jobs, timeout=15000)
 
     assert window.info.path == destination
+    assert [(marker.frame.index, marker.label) for marker in window.markers] == [
+        (0, "課程片頭"),
+        (1, "Slide 1"),
+    ]
+    assert all(marker.source == "eeclass" for marker in window.markers)
+    assert "EE-Class｜課程片頭" in window.marker_list.item(0).text()
+    assert window.dirty
     assert window.progress.value() == 100
     assert window.statusBar().currentMessage() == "影片已載入"
     window.dirty = False

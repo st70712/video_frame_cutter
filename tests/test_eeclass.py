@@ -11,9 +11,11 @@ import video_frame_cutter.eeclass as eeclass_module
 from video_frame_cutter.eeclass import (
     EeclassCookie,
     EeclassDownloadError,
+    EeclassIndex,
     EeclassMediaRequest,
     EeclassRedirectHandler,
     download_eeclass_mp4,
+    extract_eeclass_indexes,
     extract_eeclass_mp4_source,
     is_eeclass_mp4_request,
     redacted_url,
@@ -87,6 +89,53 @@ def media_html(sources):
         json.dumps({"src": sources}, ensure_ascii=False).encode("utf-8")
     ).decode("ascii")
     return f"media = JSON.parse(atob('{payload}'));"
+
+
+def test_extract_indexes_preserves_milliseconds_and_deduplicates_page_variants():
+        item = """
+                <li class="idx curr js-index-item" data-id="1398109" data-time="0">
+                    <span class="time hint">00:00</span>
+                    <div class="title js-title" title="課程片頭">課程片頭</div>
+                </li>
+        """
+        html = f"""
+                <div id="indexBox-inline">{item}</div>
+                <div class="indexBox">
+                    <li class="idx js-index-item" data-id="1398110" data-time="60105">
+                        <div class="title js-title" title="Slide &amp; 1">Slide &amp; 1</div>
+                    </li>
+                </div>
+                <div id="info-tabs-index">{item}</div>
+        """
+
+        assert extract_eeclass_indexes(html) == (
+                EeclassIndex(0, "課程片頭", "1398109"),
+                EeclassIndex(60105, "Slide & 1", "1398110"),
+        )
+
+
+def test_extract_indexes_uses_value_fallback_and_ignores_invalid_items():
+        html = """
+                <li class="js-index-item" data-time="2000">
+                    <div class="title js-title"> Second   title </div>
+                </li>
+                <li class="js-index-item" data-time="1000">
+                    <div class="title js-title" title="First title"></div>
+                </li>
+                <li class="js-index-item" data-time="2000">
+                    <div class="title js-title">Second title</div>
+                </li>
+                <li class="js-index-item" data-time="-1">
+                    <div class="title js-title">Negative</div>
+                </li>
+                <li class="js-index-item"><div class="title js-title">Missing time</div></li>
+                <li class="js-index-item" data-time="3000"></li>
+        """
+
+        assert extract_eeclass_indexes(html) == (
+                EeclassIndex(1000, "First title"),
+                EeclassIndex(2000, "Second title"),
+        )
 
 
 @pytest.mark.parametrize(
