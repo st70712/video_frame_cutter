@@ -5,6 +5,7 @@ import os
 import re
 import ssl
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
@@ -53,6 +54,85 @@ class EeclassMediaRequest:
     page_url: str
     headers: tuple[tuple[str, str], ...] = ()
     cookies: tuple[EeclassCookie, ...] = ()
+
+
+@dataclass(frozen=True)
+class EeclassIndex:
+    milliseconds: int
+    title: str
+    index_id: str | None = None
+
+
+class _EeclassIndexParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items = []
+        self._item = None
+        self._depth = 0
+        self._title_depth = None
+        self._title_attribute = ""
+        self._title_parts = []
+
+    @staticmethod
+    def _attributes(attributes):
+        return {name.lower(): value for name, value in attributes}
+
+    @staticmethod
+    def _classes(attributes):
+        return set((attributes.get("class") or "").split())
+
+    def handle_starttag(self, tag, attributes):
+        attributes = self._attributes(attributes)
+        if self._item is None:
+            if "js-index-item" not in self._classes(attributes):
+                return
+            self._item = attributes
+            self._depth = 1
+            self._title_depth = None
+            self._title_attribute = ""
+            self._title_parts = []
+            return
+        self._depth += 1
+        classes = self._classes(attributes)
+        if "title" in classes and "js-title" in classes:
+            self._title_depth = self._depth
+            self._title_attribute = attributes.get("title") or ""
+            self._title_parts = []
+
+    def handle_data(self, data):
+        if self._title_depth is not None:
+            self._title_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if self._item is None:
+            return
+        if self._title_depth == self._depth:
+            self._title_depth = None
+        self._depth -= 1
+        if self._depth == 0:
+            text = " ".join("".join(self._title_parts).split())
+            title = text or " ".join(self._title_attribute.split())
+            self.items.append((self._item, title))
+            self._item = None
+
+
+def extract_eeclass_indexes(html):
+    parser = _EeclassIndexParser()
+    parser.feed(html)
+    indexes = []
+    seen = set()
+    for attributes, title in parser.items:
+        time_value = (attributes.get("data-time") or "").strip()
+        if not title or re.fullmatch(r"[0-9]+", time_value) is None:
+            continue
+        milliseconds = int(time_value)
+        index_id = (attributes.get("data-id") or "").strip() or None
+        key = ("id", index_id) if index_id is not None else ("value", milliseconds, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        indexes.append(EeclassIndex(milliseconds, title, index_id))
+    return tuple(sorted(indexes, key=lambda item: item.milliseconds))
 
 
 def is_eeclass_host(hostname):

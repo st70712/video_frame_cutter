@@ -25,6 +25,7 @@ from ..eeclass import (
     FORWARDED_HEADERS,
     EeclassCookie,
     EeclassMediaRequest,
+    extract_eeclass_indexes,
     extract_eeclass_mp4_source,
     is_eeclass_mp4_request,
     redacted_url,
@@ -122,7 +123,9 @@ class EeclassDownloadDialog(QDialog):
         self.resize(980, 720)
         self.setMinimumSize(760, 560)
         self.media = None
+        self.indexes = ()
         self.destination = None
+        self._pending_media = None
         self._probe_token = 0
         self._closing = False
 
@@ -173,13 +176,20 @@ class EeclassDownloadDialog(QDialog):
             return
         self._probe_token += 1
         self.media = None
+        self.indexes = ()
         self.destination = None
+        self._pending_media = None
         self.download_button.setEnabled(False)
         self.url.setText(page_url)
         self.browser.load(QUrl(page_url))
 
     def _load_started(self):
         self._probe_token += 1
+        self.media = None
+        self.indexes = ()
+        self.destination = None
+        self._pending_media = None
+        self.download_button.setEnabled(False)
         self.status.setText("正在載入頁面…")
 
     def _load_finished(self, succeeded):
@@ -210,6 +220,13 @@ class EeclassDownloadDialog(QDialog):
             return
         if current_page_url != page_url:
             return
+        indexes = extract_eeclass_indexes(html)
+        if self._pending_media is not None:
+            pending = self._pending_media
+            self._pending_media = None
+            if self._accept_media(*pending, indexes):
+                self.browser.stop()
+            return
         media_url = extract_eeclass_mp4_source(html, page_url)
         if media_url is None:
             self.status.setText("頁面已載入，但找不到可下載的直接 MP4 影片")
@@ -221,14 +238,47 @@ class EeclassDownloadDialog(QDialog):
                 ("User-Agent", self.profile.httpUserAgent()),
                 ("Referer", page_url),
             ),
+            indexes,
         )
 
     def _media_found(self, media_url, page_url, headers):
-        if not self._accept_media(media_url, page_url, headers):
+        if self.media is not None or self._pending_media is not None or self._closing:
             return
-        self.browser.stop()
+        try:
+            page_url = validate_eeclass_page_url(page_url)
+        except ValueError:
+            return
+        if not self._valid_media(media_url, page_url):
+            return
+        self._pending_media = (media_url, page_url, tuple(headers))
+        token = self._probe_token
+        self.status.setText("已找到影片，正在讀取時間軸索引…")
+        self.page.toHtml(
+            lambda html, page_url=page_url, token=token: self._intercepted_html_ready(
+                html, page_url, token
+            )
+        )
 
-    def _accept_media(self, media_url, page_url, headers):
+    def _intercepted_html_ready(self, html, page_url, token):
+        if (
+            self._closing
+            or token != self._probe_token
+            or self.media is not None
+            or self._pending_media is None
+        ):
+            return
+        try:
+            current_page_url = validate_eeclass_page_url(self.page.url().toString())
+        except ValueError:
+            return
+        if current_page_url != page_url:
+            return
+        pending = self._pending_media
+        self._pending_media = None
+        if self._accept_media(*pending, extract_eeclass_indexes(html)):
+            self.browser.stop()
+
+    def _valid_media(self, media_url, page_url):
         if self.media is not None or self._closing:
             return False
         try:
@@ -243,12 +293,18 @@ class EeclassDownloadDialog(QDialog):
                 return False
             if current_url != page_url:
                 return False
-        if not is_eeclass_mp4_request(media_url, page_url, True):
+        return is_eeclass_mp4_request(media_url, page_url, True)
+
+    def _accept_media(self, media_url, page_url, headers, indexes=()):
+        if not self._valid_media(media_url, page_url):
             return False
         self.media = EeclassMediaRequest(
             media_url, page_url, tuple(headers), self.cookie_bridge.snapshot()
         )
-        self.status.setText(f"已找到影片：{redacted_url(media_url)}")
+        self.indexes = tuple(indexes)
+        self.status.setText(
+            f"已找到影片與 {len(self.indexes)} 個時間軸索引：{redacted_url(media_url)}"
+        )
         self.download_button.setEnabled(True)
         return True
 
@@ -257,7 +313,9 @@ class EeclassDownloadDialog(QDialog):
         self.cookie_bridge.clear()
         self.profile.clearHttpCache()
         self.media = None
+        self.indexes = ()
         self.destination = None
+        self._pending_media = None
         self.download_button.setEnabled(False)
         self.status.setText("登入資料已清除")
 
@@ -280,7 +338,7 @@ class EeclassDownloadDialog(QDialog):
         self.accept()
 
     def selection(self):
-        return self.media, self.destination
+        return self.media, self.destination, self.indexes
 
     def done(self, result):
         self._closing = True

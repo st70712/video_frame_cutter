@@ -14,7 +14,15 @@ from video_frame_cutter.video import Cancelled, index_video
 
 def test_roundtrip_and_export(video_path, tmp_path):
     info = index_video(video_path)
-    markers = [Marker(info.frames[20], crop=CropRect(0.2, 0.1, 0.8, 0.9)), Marker(info.frames[2])]
+    markers = [
+        Marker(
+            info.frames[20],
+            crop=CropRect(0.2, 0.1, 0.8, 0.9),
+            source="eeclass",
+            label="課程片尾",
+        ),
+        Marker(info.frames[2]),
+    ]
     settings = ExportSettings(320, 180, 95, True)
     analysis_settings = AnalysisSettings(
         duplicate_window_seconds=3.0, start_seconds=0.5, end_seconds=2.5
@@ -46,11 +54,14 @@ def test_roundtrip_and_export(video_path, tmp_path):
         export_markers(info, markers, settings, output, "pptx")
 
     legacy_document = json.loads(project.read_text(encoding="utf-8"))
+    for marker in legacy_document["markers"]:
+        marker.pop("label")
     for field in ("duplicate_window_seconds", "start_seconds", "end_seconds"):
         legacy_document["analysis"].pop(field)
     legacy_project = tmp_path / "legacy-project.json"
     legacy_project.write_text(json.dumps(legacy_document), encoding="utf-8")
-    _, _, legacy_analysis, _ = read_project(legacy_project)
+    _, legacy_markers, legacy_analysis, _ = read_project(legacy_project)
+    assert all(marker.label == "" for marker in legacy_markers)
     assert legacy_analysis.duplicate_window_seconds == 0.0
     assert legacy_analysis.start_seconds == 0.0
     assert legacy_analysis.end_seconds is None

@@ -190,6 +190,7 @@ def test_scoped_merge_preserves_markers_outside_range_and_user_edits():
 
     before = marker(0, 0.5, source="automatic")
     manual = marker(1, 1.0)
+    eeclass = marker(7, 1.25, source="eeclass", label="Slide 1")
     modified = marker(2, 1.5, source="automatic", modified=True)
     replaced = marker(3, 1.75, source="automatic")
     boundary = marker(4, 2.0, source="automatic")
@@ -198,12 +199,12 @@ def test_scoped_merge_preserves_markers_outside_range_and_user_edits():
     settings = AnalysisSettings(start_seconds=1.0, end_seconds=2.0)
 
     merged = merge_markers(
-        [before, manual, modified, replaced, boundary, after],
+        [before, manual, eeclass, modified, replaced, boundary, after],
         [marker(1, 1.0, source="automatic"), candidate],
         settings,
     )
 
-    assert merged == [before, manual, modified, candidate, after]
+    assert merged == [before, manual, eeclass, modified, candidate, after]
 
 
 def test_scoped_curve_merge_replaces_inclusive_range():

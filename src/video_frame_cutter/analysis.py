@@ -427,7 +427,7 @@ def merge_markers(existing, candidates, settings=None):
     kept = [
         marker
         for marker in existing
-        if marker.source == "manual"
+        if marker.source in ("manual", "eeclass")
         or marker.modified
         or (settings is not None and not settings.includes(marker.frame.seconds))
     ]

@@ -69,7 +69,11 @@ def read_project(path):
         entry["frame"] = FrameRef(**entry["frame"])
         entry["crop"] = CropRect(**entry["crop"])
         marker = Marker(**entry)
-        if marker.source not in ("automatic", "manual") or not isinstance(marker.uid, str):
+        if (
+            marker.source not in ("automatic", "manual", "eeclass")
+            or not isinstance(marker.uid, str)
+            or not isinstance(marker.label, str)
+        ):
             raise ValueError("Invalid marker")
         if any(
             type(value) is not bool for value in (marker.modified, marker.included, marker.review)

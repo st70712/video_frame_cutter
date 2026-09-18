@@ -80,6 +80,14 @@ def media_html(sources):
     return f"media = JSON.parse(atob('{payload}'));"
 
 
+def index_html(contents="課程片頭", milliseconds=0, index_id="1398109"):
+        return f"""
+                <li class="idx js-index-item" data-id="{index_id}" data-time="{milliseconds}">
+                    <div class="title js-title" title="{contents}">{contents}</div>
+                </li>
+        """
+
+
 def test_cookie_bridge_snapshots_and_clears_cookie_data():
     store = FakeCookieStore()
     bridge = EeclassCookieBridge(store)
@@ -160,13 +168,16 @@ def test_download_dialog_redacts_candidate_and_returns_destination(
     qtbot.addWidget(owner)
     profile = create_eeclass_profile(owner, tmp_path / "profile")
     dialog = EeclassDownloadDialog(profile, owner)
-    qtbot.addWidget(dialog)
+    page_url = "https://school.ouk.edu.tw/media/doc/252890"
+    page = FakeHtmlPage(page_url)
+    dialog.page = page
     media_url = "https://school.ouk.edu.tw/video/lecture.mp4?token=secret"
     dialog._media_found(
         media_url,
-        "https://school.ouk.edu.tw/media/doc/252890",
+        page_url,
         (("User-Agent", "Test Browser"),),
     )
+    page.callbacks[-1](index_html())
     destination = tmp_path / "saved"
     monkeypatch.setattr(
         QFileDialog, "getSaveFileName", lambda *args: (str(destination), "")
@@ -177,9 +188,10 @@ def test_download_dialog_redacts_candidate_and_returns_destination(
     assert "secret" not in dialog.status.text()
     dialog.choose_destination()
 
-    media, selected = dialog.selection()
+    media, selected, indexes = dialog.selection()
     assert media.url == media_url
     assert selected == Path(f"{destination}.mp4")
+    assert indexes[0].title == "課程片頭"
 
 
 def test_download_dialog_finds_embedded_media_without_playback(qtbot, tmp_path):
@@ -209,14 +221,17 @@ def test_download_dialog_finds_embedded_media_without_playback(qtbot, tmp_path):
                 },
             ]
         )
+        + index_html()
     )
 
-    media, _ = dialog.selection()
+    media, _, indexes = dialog.selection()
     assert dialog.download_button.isEnabled()
     assert media.url == media_url
     assert media.cookies == (cookie,)
     assert ("Referer", page_url) in media.headers
     assert any(name == "User-Agent" and value for name, value in media.headers)
+    assert indexes[0].milliseconds == 0
+    assert indexes[0].title == "課程片頭"
     assert "token" not in dialog.status.text()
     assert "secret" not in dialog.status.text()
     dialog.reject()
@@ -244,4 +259,35 @@ def test_download_dialog_ignores_stale_html_probe(qtbot, tmp_path):
     dialog._load_finished(True)
     page.callbacks[-1]("<html></html>")
     assert "找不到可下載" in dialog.status.text()
+    dialog.reject()
+
+
+def test_download_dialog_accepts_media_without_indexes_and_ignores_stale_intercept(
+    qtbot, tmp_path
+):
+    owner = QWidget()
+    qtbot.addWidget(owner)
+    profile = create_eeclass_profile(owner, tmp_path / "profile")
+    dialog = EeclassDownloadDialog(profile, owner)
+    page_url = "https://school.ouk.edu.tw/media/doc/252890"
+    page = FakeHtmlPage(page_url)
+    dialog.page = page
+    media_url = "https://school.ouk.edu.tw/video/lecture.mp4"
+
+    dialog._media_found(media_url, page_url, ())
+    stale_callback = page.callbacks[-1]
+    dialog._load_started()
+    stale_callback(index_html())
+
+    assert dialog.media is None
+    assert not dialog.download_button.isEnabled()
+
+    dialog._media_found(media_url, page_url, ())
+    page.callbacks[-1]("<html><body>No indexes</body></html>")
+
+    media, _, indexes = dialog.selection()
+    assert media.url == media_url
+    assert indexes == ()
+    assert dialog.download_button.isEnabled()
+    assert "0 個時間軸索引" in dialog.status.text()
     dialog.reject()
