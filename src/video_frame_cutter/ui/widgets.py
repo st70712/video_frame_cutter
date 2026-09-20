@@ -460,10 +460,18 @@ class ExportSettingsDialog(QDialog):
         ):
             control.setRange(16, 8192)
             control.setValue(value)
+        self.times = QLabel("×")
         dimensions = QHBoxLayout()
         dimensions.addWidget(self.output_width)
-        dimensions.addWidget(QLabel("×"))
+        dimensions.addWidget(self.times)
         dimensions.addWidget(self.output_height)
+        self.dimensions_label = QLabel("輸出尺寸 (px)")
+        self.original = QCheckBox("裁切後不拉伸（輸出原始像素）")
+        self.original.setChecked(settings.fit == "original")
+        self.original.setToolTip(
+            "依每個標記自己的裁切像素輸出，畫面不變形；"
+            "此時忽略上方的輸出尺寸，每張圖大小可能不同。"
+        )
         self.quality = QSpinBox()
         self.quality.setRange(1, 100)
         self.quality.setValue(settings.quality)
@@ -474,7 +482,8 @@ class ExportSettingsDialog(QDialog):
         self.selected_only.setEnabled(selected_count > 0)
         form = QFormLayout()
         form.addRow("格式", self.format)
-        form.addRow("輸出尺寸 (px)", dimensions)
+        form.addRow(self.dimensions_label, dimensions)
+        form.addRow("", self.original)
         form.addRow("JPEG 品質", self.quality)
         form.addRow("", self.timestamp)
         form.addRow("", self.selected_only)
@@ -489,10 +498,14 @@ class ExportSettingsDialog(QDialog):
         layout.addLayout(form)
         layout.addWidget(buttons)
         self.format.currentIndexChanged.connect(self._update_format_controls)
+        self.original.toggled.connect(self._update_format_controls)
         self._update_format_controls()
 
     def _update_format_controls(self):
         self.timestamp.setEnabled(self.kind() == "pptx")
+        stretched = not self.original.isChecked()
+        for control in (self.dimensions_label, self.output_width, self.times, self.output_height):
+            control.setEnabled(stretched)
 
     def kind(self):
         return self.format.currentData()
@@ -503,6 +516,7 @@ class ExportSettingsDialog(QDialog):
             self.output_height.value(),
             self.quality.value(),
             self.timestamp.isChecked(),
+            "original" if self.original.isChecked() else "stretch",
         )
 
 
@@ -541,7 +555,13 @@ class CropDialog(QDialog):
         self.magic_padding.setDecimals(2)
         self.magic_padding.setValue(1)
         self.magic_aspect = QCheckBox("維持匯出比例")
-        self.magic_aspect.setChecked(True)
+        stretched = output.fit != "original"
+        self.magic_aspect.setChecked(stretched)
+        self.magic_aspect.setEnabled(stretched)
+        if not stretched:
+            self.magic_aspect.setToolTip(
+                "匯出設定為裁切後不拉伸，裁切比例不會影響輸出。"
+            )
         self.hint = QLabel()
         self.hint.setWordWrap(True)
         self.hint.setFixedWidth(240)
@@ -637,7 +657,7 @@ class CropDialog(QDialog):
             field.setValue(value * 100)
             field.blockSignals(False)
         image = self.source.crop(crop.pixels(self.source.size))
-        size = (self.output.width, self.output.height)
+        size = self.output.output_size(image.size)
         scale = min(240 / size[0], 150 / size[1])
         image = image.resize(
             (max(1, round(size[0] * scale)), max(1, round(size[1] * scale))),

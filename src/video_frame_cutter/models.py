@@ -97,18 +97,33 @@ class AnalysisSettings:
         )
 
 
+FIT_MODES = ("stretch", "original")
+
+
 @dataclass
 class ExportSettings:
     width: int = 1920
     height: int = 1080
     quality: int = 95
     timestamp: bool = False
+    fit: str = "stretch"
 
     def validate(self):
+        if self.fit not in FIT_MODES:
+            raise ValueError("Unsupported output fit mode")
         if not (16 <= self.width <= 8192 and 16 <= self.height <= 8192):
             raise ValueError("Output dimensions must be between 16 and 8192")
         if not 1 <= self.quality <= 100:
             raise ValueError("JPEG quality must be between 1 and 100")
+
+    def output_size(self, crop_size):
+        """Pixel size of one exported image rendered from a crop of ``crop_size``.
+
+        ``stretch`` scales every crop to the configured size, so a crop of a different
+        shape is distorted; ``original`` hands the cropped pixels through untouched and
+        ignores the configured size, so each image keeps its own shape and scale.
+        """
+        return tuple(crop_size) if self.fit == "original" else (self.width, self.height)
 
 
 def timecode(seconds):

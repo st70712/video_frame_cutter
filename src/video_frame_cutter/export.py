@@ -12,15 +12,60 @@ from pptx.util import Inches, Pt
 from .models import timecode
 from .video import FrameReader, check_cancel
 
+# Widest and tallest a picture may be placed. PowerPoint rejects slides over 56 inches,
+# so the largest picture is kept well inside that and everything else shares its scale.
+PICTURE_LIMIT = (Inches(50), Inches(7.5))
+
 
 def render_marker(reader, marker, settings, cancel=None):
     settings.validate()
     image = reader.get(marker.frame, cancel)
     image = image.crop(marker.crop.pixels(image.size))
-    image = image.resize((settings.width, settings.height), Image.Resampling.LANCZOS)
+    size = settings.output_size(image.size)
+    if size != image.size:
+        image = image.resize(size, Image.Resampling.LANCZOS)
     output = BytesIO()
     image.convert("RGB").save(output, "JPEG", quality=settings.quality)
     return output.getvalue()
+
+
+def add_slide(deck, content, marker, timestamp):
+    """Add one picture slide, leaving its geometry to :func:`layout_deck`."""
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    picture = slide.shapes.add_picture(BytesIO(content), 0, 0)
+    caption = None
+    if timestamp:
+        caption = slide.shapes.add_textbox(0, 0, 0, 0)
+        paragraph = caption.text_frame.paragraphs[0]
+        paragraph.text = timecode(marker.frame.seconds)
+        paragraph.font.size = Pt(12)
+    return picture, caption, picture.image.size
+
+
+def layout_deck(deck, placements, timestamp):
+    """Size the deck for the largest picture and centre the content of every slide.
+
+    A presentation has one slide size for all of its slides, so the layout has to wait
+    until every picture is rendered: an ``original`` export varies in size from slide to
+    slide. One shared scale keeps each picture's own aspect ratio and, between pictures,
+    their relative sizes; a crop half as wide stays half as wide on its slide.
+    """
+    widest = max(width for _, _, (width, _) in placements)
+    tallest = max(height for _, _, (_, height) in placements)
+    scale = min(PICTURE_LIMIT[0] / widest, PICTURE_LIMIT[1] / tallest)
+    footer = Inches(0.35) if timestamp else 0
+    deck.slide_width = max(Inches(2.5 if timestamp else 1), round(widest * scale))
+    deck.slide_height = max(Inches(1), round(tallest * scale) + footer)
+    for picture, caption, (width, height) in placements:
+        picture.width = round(width * scale)
+        picture.height = round(height * scale)
+        picture.left = (deck.slide_width - picture.width) // 2
+        picture.top = (deck.slide_height - footer - picture.height) // 2
+        if caption is not None:
+            caption.left = Inches(0.15)
+            caption.top = deck.slide_height - footer
+            caption.width = deck.slide_width - Inches(0.3)
+            caption.height = footer
 
 
 def export_markers(
@@ -49,17 +94,8 @@ def export_markers(
     parent = destination if kind == "jpg" else destination.parent
     with tempfile.TemporaryDirectory(prefix=".frame-export-", dir=parent) as temporary:
         staging = Path(temporary)
-        deck = None
-        if kind == "pptx":
-            deck = Presentation()
-            ratio = settings.width / settings.height
-            image_height = Inches(min(7.5, 50 / ratio))
-            image_width = round(image_height * ratio)
-            footer = Inches(0.35) if settings.timestamp else 0
-            deck.slide_width = max(Inches(2.5 if settings.timestamp else 1), image_width)
-            deck.slide_height = max(Inches(1), image_height + footer)
-            image_left = (deck.slide_width - image_width) // 2
-            image_top = (deck.slide_height - footer - image_height) // 2
+        deck = Presentation() if kind == "pptx" else None
+        placements = []
         with FrameReader(info, cache_size=1) as reader:
             for index, marker in enumerate(markers):
                 check_cancel(cancel)
@@ -68,21 +104,11 @@ def export_markers(
                     name = f"{index + 1:04}_{timecode(marker.frame.seconds).replace(':', '-')}.jpg"
                     (staging / name).write_bytes(content)
                 else:
-                    slide = deck.slides.add_slide(deck.slide_layouts[6])
-                    slide.shapes.add_picture(
-                        BytesIO(content), image_left, image_top, image_width, image_height
-                    )
-                    if settings.timestamp:
-                        text = slide.shapes.add_textbox(
-                            Inches(0.15), deck.slide_height - footer,
-                            deck.slide_width - Inches(0.3), footer
-                        )
-                        paragraph = text.text_frame.paragraphs[0]
-                        paragraph.text = timecode(marker.frame.seconds)
-                        paragraph.font.size = Pt(12)
+                    placements.append(add_slide(deck, content, marker, settings.timestamp))
                 progress(int((index + 1) / len(markers) * 100))
         check_cancel(cancel)
         if deck is not None:
+            layout_deck(deck, placements, settings.timestamp)
             output = staging / "export.pptx"
             deck.save(str(output))
             check_cancel(cancel)
