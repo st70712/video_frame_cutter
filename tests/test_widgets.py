@@ -70,6 +70,53 @@ def test_export_settings_dialog_options(qtbot):
     assert not no_selection.selected_only.isChecked()
 
 
+def test_export_settings_dialog_no_stretch_option(qtbot):
+    dialog = ExportSettingsDialog(ExportSettings(1280, 720, 88, True), 0)
+    qtbot.addWidget(dialog)
+
+    assert not dialog.original.isChecked()
+    assert dialog.output_width.isEnabled() and dialog.output_height.isEnabled()
+    assert dialog.settings().fit == "stretch"
+
+    dialog.original.setChecked(True)
+
+    assert not dialog.dimensions_label.isEnabled()
+    assert not dialog.output_width.isEnabled() and not dialog.output_height.isEnabled()
+    settings = dialog.settings()
+    assert settings.fit == "original"
+    # The ignored size is kept so unticking the box restores what the user had.
+    assert (settings.width, settings.height) == (1280, 720)
+
+    restored = ExportSettingsDialog(settings, 0)
+    qtbot.addWidget(restored)
+    assert restored.original.isChecked()
+    assert not restored.output_width.isEnabled()
+    restored.original.setChecked(False)
+    assert restored.output_width.isEnabled()
+    assert restored.settings() == ExportSettings(1280, 720, 88, True)
+
+
+def test_crop_dialog_preview_follows_fit(qtbot):
+    image = Image.new("RGB", (320, 180), "red")
+    crop = CropRect(0, 0, 0.5, 1)
+    stretched = CropDialog(image, crop, ExportSettings(640, 360), 1, 5)
+    qtbot.addWidget(stretched)
+    original = CropDialog(image, crop, ExportSettings(640, 360, fit="original"), 1, 5)
+    qtbot.addWidget(original)
+
+    # Expanding a magic crop to the export ratio only avoids stretching, so it is off
+    # for an export that never stretches.
+    assert stretched.magic_aspect.isEnabled() and stretched.magic_aspect.isChecked()
+    assert not original.magic_aspect.isEnabled() and not original.magic_aspect.isChecked()
+
+    def preview_ratio(dialog):
+        size = dialog.preview.pixmap().size()
+        return size.width() / size.height()
+
+    assert preview_ratio(stretched) == pytest.approx(640 / 360, rel=0.02)
+    assert preview_ratio(original) == pytest.approx(160 / 180, rel=0.02)
+
+
 def test_crop_dialog(qtbot):
     dialog = CropDialog(
         Image.new("RGB", (320, 180), "red"), CropRect(), ExportSettings(), 3, 5
